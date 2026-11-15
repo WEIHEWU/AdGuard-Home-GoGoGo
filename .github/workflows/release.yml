@@ -22,7 +22,7 @@ jobs:
         run: |
           case "${GITHUB_REF_NAME:-}" in
             v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
-            *)  VERSION_TAG="v20261113.1" ;;
+            *)  VERSION_TAG="v20261116.1" ;;
           esac
           VERSION_DATE="${VERSION_TAG#v}"
           chmod +x ./build.sh
@@ -35,11 +35,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.VERSION_TAG }}
-          name: "AdGuard Home GoGoGo ${{ env.VERSION_TAG }} (Dual-Port SNI & Full Closed-Loop Edition)"
+          name: "AdGuard Home GoGoGo ${{ env.VERSION_TAG }} (Performance, Power & Soft-Reboot Stability Edition)"
           body: |
-            ### 🚀 AdGuard Home GoGoGo `v20261113.1` (集百家之长 · 性能、耗电与软重启稳定加固版)
+            ### 🚀 AdGuard Home GoGoGo `v20261116.1` (集百家之长 · 性能、耗电与软重启稳定加固版)
 
-            基于 `v20261113.1` 双引擎核心（100% 保持全部广告规则、白名单、过滤语义、双端口 SNI 与 VPN 策略不变），完成全链路性能、内存、并发可靠性与代理联动安全补修：
+            基于 `v20261113.1` 双引擎核心（100% 保持全部广告规则、白名单、过滤语义、双端口 SNI 与 VPN 策略不变），完成全链路性能、内存、并发可靠性与代理联动安全补修，并内置最新 **[AdGuard-Home-GoGoGo Manager v2.24.19](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager)**：
 
             1. **🛡️ 升级不覆盖设备规则 + 白名单级无损热切换 (`customize.sh` / `switch_mode.sh`)**：
                - 刷机升级明确区分首次安装与覆盖升级，采用当次独立备份完整保留设备现有订阅规则文件集合（含同名订阅修改、用户新增订阅及已删默认订阅状态）与 `AdGuardHome.yaml`，检测到冲突 hosts 模块或备份失败时立即中止且不留残留标记；
@@ -51,9 +51,9 @@ jobs:
             3. **⚡ 临时 Root 软重启就绪等待、内核 `flock` 并发互斥与单次刷表 (`service.sh` / `iptables.sh`)**：
                - 软重启后自动等待系统与数据分区就绪，合并启动及切模流程中的重复 `iptables` 刷表为单次原子挂载，缓存 `ip6tables` 探测结果并消除巡检空转外部命令开销；
                - 全面采用内核 `flock` 保护服务操作与防火墙刷表（后台守护进程启动前显式关闭锁 FD 防继承），支持信号中断时的活动子进程回收与真实失败码透传。
-            4. **🧠 定制核心 (`AdGuard-Home-GoGoGo-Core`) 与配套管理器 (`v2.24.18`) 协同省电**：
+            4. **🧠 定制核心 (`AdGuard-Home-GoGoGo-Core`) 与配套管理器 (`v2.24.19`) 协同省电**：
                - 核心：环形查询日志 (`2016 -> 2000` 高水位截断) 与统计切片底层数组按需收缩防内存滞留、过期会话惰性清理、DoH 响应体 `io.LimitReader` 排空复用 HTTP/2 连接；
-               - 管理器：引入目标感知有序模式切换队列（相同目标合并共享、不同目标按序串行執行、超时不破坏互斥锁）、Root 探测缓存与熔断、状态栏快捷磁贴 (`AGH GoGoGo`) 超时强制回收，以及退至后台/锁屏时自动暂停轮询。
+               - 管理器 (`v2.24.19`, `versionCode 185`)：引入目标感知有序模式切换队列（相同目标合并共享、不同目标按序串行执行、超时不破坏互斥锁）、Root 探测缓存与熔断、状态栏快捷磁贴 (`AGH GoGoGo`) 超时强制回收，以及退至后台/锁屏时自动暂停轮询。
             5. **🔒 `443` + `8443` 双端口首包级低功耗 SNI 嗅探 + 私人 DNS 闭环 + `1,764` 条精校规则**：
                - 保持 `443/8443` `connbytes 1:4` 首包 NFQUEUE 嗅探、系统私人 DNS (`private_dns_mode`) 备份与停机还原、以及多用户 `*==deleted==` 残留目录自愈清理。
           files: |
