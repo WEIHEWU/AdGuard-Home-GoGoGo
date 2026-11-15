@@ -2,7 +2,7 @@
 SKIPUNZIP=1
 
 # 多语言检测
-locale=$(getprop persist.sys.locale | tr '[:upper:]' '[:lower:]')
+locale=$(getprop persist.sys.locale 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
 [ -z "$locale" ] && locale="zh"
 ui_print "- $locale"
 case $locale in
@@ -10,95 +10,369 @@ case $locale in
   *)   language=zh ;;
 esac
 i18n_print() {
-  [ "$language" = "zh" ] && ui_print "$2" || ui_print "$1"
+  if [ "$language" = "zh" ]; then
+    ui_print "$2"
+  else
+    ui_print "$1"
+  fi
 }
 
-# 检测所有Hosts模块
-i18n_print "- Checking for Hosts modules" "- 正在检测Hosts模块"
-found_hosts=false;for module in /data/adb/modules/*;do [ -f "$module/system/etc/hosts" ]&&[ -f "$module/module.prop" ]&&{ [ "$found_hosts" = false ]&&i18n_print "- Found Hosts modules, auto-removing:" "- 发现Hosts模块，正在自动移除:"&&found_hosts=true;ui_print "  $(grep_prop name "$module/module.prop")";touch "$module/remove";};done
-[ "$found_hosts" = true ]&&i18n_print "- Conflicting modules have been marked for removal. Please reboot after installation." "- 冲突模块已标记移除，安装完成后请重启设备。"
+fail_install() {
+  i18n_print "! Installation aborted: $1" "! 安装已中止: $2"
+  if [ -n "${UPGRADE_BACKUP_DIR:-}" ] && [ -d "$UPGRADE_BACKUP_DIR" ]; then
+    i18n_print "! Recoverable backup preserved at: $UPGRADE_BACKUP_DIR" "! 可恢复备份已保留在: $UPGRADE_BACKUP_DIR"
+  fi
+  if type abort >/dev/null 2>&1; then
+    abort "$1"
+  fi
+  exit 1
+}
 
-AGH_DIR="/data/adb/agh"
+AGH_DIR="${AGH_DIR:-/data/adb/agh}"
 BIN_DIR="$AGH_DIR/bin"
 SCRIPT_DIR="$AGH_DIR/scripts"
-BACKUP_DIR="$AGH_DIR/backup"
-ADGPATH="/data/adb/modules/AdGuardHome"
-PROXY_SCRIPT="$AGH_DIR/scripts/ProxyConfig.sh"
+ADGPATH="${ADGPATH:-/data/adb/modules/AdGuardHome}"
+MODULES_ROOT="${MODULES_ROOT:-/data/adb/modules}"
+
+# 检测潜在冲突的 Hosts 模块（仅提示并记录模块名称，绝不自动创建 remove/disable 或修改其他模块，发现冲突明确中止安装）
+i18n_print "- Checking for Hosts modules" "- 正在检测Hosts模块"
+found_hosts=false
+conflict_hosts_list=""
+for module in "$MODULES_ROOT"/*; do
+  [ -d "$module" ] || continue
+  [ "$module" = "$MODPATH" ] || [ "$module" = "$ADGPATH" ] || [ "${module##*/}" = "AdGuardHome" ] && continue
+  if [ -f "$module/system/etc/hosts" ] && [ -f "$module/module.prop" ]; then
+    if [ "$found_hosts" = false ]; then
+      i18n_print "! Conflicting Hosts module(s) detected (will NOT modify or remove other modules automatically):" "! 检测到潜在冲突的 Hosts 模块（不会自动移除或修改其他模块）:"
+      found_hosts=true
+    fi
+    mod_name=""
+    if type grep_prop >/dev/null 2>&1; then
+      mod_name=$(grep_prop name "$module/module.prop" 2>/dev/null || true)
+    fi
+    if [ -z "$mod_name" ]; then
+      mod_name=$(sed -n 's/^name=//p' "$module/module.prop" 2>/dev/null | head -n 1 || true)
+    fi
+    [ -z "$mod_name" ] && mod_name="${module##*/}"
+    ui_print "  - $mod_name (${module##*/})"
+    if [ -z "$conflict_hosts_list" ]; then
+      conflict_hosts_list="$mod_name"
+    else
+      conflict_hosts_list="$conflict_hosts_list, $mod_name"
+    fi
+  fi
+done
+if [ "$found_hosts" = true ]; then
+  fail_install "Conflicting Hosts module detected ($conflict_hosts_list). Please disable or remove it manually in your Root manager and retry." "检测到冲突的 Hosts 模块 ($conflict_hosts_list)，请先在 Root 管理器中自行禁用或移除该模块后再重试安装。"
+fi
 
 i18n_print "- Extracting basic module files" "- 正在解压模块基本文件"
+mkdir -p "$MODPATH" || fail_install "Failed to create MODPATH" "创建模块目录失败"
 for file in uninstall.sh module.prop service.sh action.sh AdGuardHomeManager.apk; do
-  unzip -q -o "$ZIPFILE" "$file" -d "$MODPATH"
+  unzip -q -o "$ZIPFILE" "$file" -d "$MODPATH" || fail_install "Failed to extract $file" "解压 $file 失败"
 done
 
-# 检查并停止运行中的进程（含旧版自愈守护单例）
+# 检查并停止运行中的进程（含守护进程）
 if [ -d "$AGH_DIR" ]; then
-i18n_print "- Stopping AdGuardHome and its additional processes" "- 正在终止AdGuardHome及附加进程"
-for pid_f in /dev/shm/agh_watchdog.pid "$AGH_DIR/run/agh_watchdog.pid"; do
+  i18n_print "- Stopping AdGuardHome and its additional processes" "- 正在终止AdGuardHome及附加进程"
+  for pid_f in /dev/shm/agh_watchdog.pid "$AGH_DIR/run/agh_watchdog.pid" \
+               /dev/shm/agh_watchdog.lock/pid "$AGH_DIR/run/agh_watchdog.lock/pid"; do
     if [ -f "$pid_f" ]; then
-        old_wd=$(cat "$pid_f" 2>/dev/null)
-        [ -n "$old_wd" ] && kill -9 "$old_wd" 2>/dev/null
-        rm -f "$pid_f" 2>/dev/null
+      old_wd=$(cat "$pid_f" 2>/dev/null || true)
+      if [ -n "$old_wd" ]; then
+        kill -9 "$old_wd" 2>/dev/null || true
+      fi
+      rm -f "$pid_f" 2>/dev/null || true
     fi
-done
-rm -f /dev/shm/agh_watchdog.lock /dev/shm/agh_manual_stop 2>/dev/null
-pkill -f "/AdGuardHome/service.sh.*--watchdog" 2>/dev/null
-while true; do
+  done
+  rm -rf /dev/shm/agh_watchdog.lock /dev/shm/agh_op.lock /dev/shm/agh_manual_stop \
+         "$AGH_DIR/run/agh_watchdog.lock" "$AGH_DIR/run/agh_op.lock" "$AGH_DIR/run/agh_manual_stop" 2>/dev/null || true
+  pkill -f "/AdGuardHome/service.sh.*--watchdog" 2>/dev/null || true
+  stop_loops=0
+  while [ "$stop_loops" -lt 10 ]; do
     found=0
     for p in /proc/[0-9]*; do
-        IFS= read -r cmd < "$p/cmdline"
-        case "$cmd" in
-            "$AGH_DIR/bin/AdGuardHome"*|*"$AGH_DIR/scripts/"*|*"/AdGuardHome/service.sh"*"--watchdog"*)
-                kill -9 "${p#/proc/}"
-                found=1
-                ;;
-        esac
+      [ -r "$p/cmdline" ] || continue
+      cmd=$(tr '\000' ' ' < "$p/cmdline" 2>/dev/null || true)
+      case "$cmd" in
+        *"$AGH_DIR/bin/AdGuardHome"*|*"$AGH_DIR/scripts/"*|*"/AdGuardHome/service.sh"*"--watchdog"*)
+          target_p="${p#/proc/}"
+          if [ "$target_p" != "$$" ]; then
+            kill -9 "$target_p" 2>/dev/null || true
+            found=1
+          fi
+          ;;
+      esac
     done
     [ "$found" -eq 0 ] && break
     sleep 1
-done
+    stop_loops=$((stop_loops + 1))
+  done
 fi
 
-# 检查是否首次安装
-if [ -d "$AGH_DIR" ]; then
-  i18n_print "- Backing up configuration" "- 正在备份配置文件"
-  mkdir -p "$BACKUP_DIR"
-  [ -f "$BIN_DIR/AdGuardHome.yaml" ] && cp -f "$BIN_DIR/AdGuardHome.yaml" "$BACKUP_DIR/"
-  [ -f "$SCRIPT_DIR/config.prop" ] && cp -f "$SCRIPT_DIR/config.prop" "$BACKUP_DIR/"
-  [ -f "$SCRIPT_DIR/NoAdsService.sh" ] && cp -f "$SCRIPT_DIR/NoAdsService.sh" "$BACKUP_DIR/"
+# 校验 YAML 基础结构与核心 --check-config（若核心可在当前环境直接执行）
+validate_yaml_candidate() {
+  vf="$1"
+  check_bin="${2:-$BIN_DIR/AdGuardHome}"
+  [ -s "$vf" ] || return 1
+  grep -q '^schema_version:' "$vf" 2>/dev/null || return 1
+  grep -q '^dns:' "$vf" 2>/dev/null || return 1
+  grep -q '^user_rules:' "$vf" 2>/dev/null || return 1
+  if [ -x "$check_bin" ]; then
+    if "$check_bin" --version >/dev/null 2>&1; then
+      "$check_bin" --check-config -c "$vf" -w "${vf%/*}" >/dev/null 2>&1 || return 1
+    fi
+  fi
+  return 0
+}
+
+copy_and_verify_file() {
+  src_f="$1"
+  dst_f="$2"
+  cp -pf "$src_f" "$dst_f" 2>/dev/null || cp -f "$src_f" "$dst_f" 2>/dev/null || return 1
+  [ -f "$dst_f" ] || return 1
+  cmp -s "$src_f" "$dst_f" || return 1
+  return 0
+}
+
+# 判定首次安装 vs 已有安装升级
+IS_UPGRADE=0
+if [ -d "$AGH_DIR" ] && { [ -e "$BIN_DIR/AdGuardHome.yaml" ] || [ -e "$BIN_DIR/AdGuardHome.yaml.bak" ] || [ -d "$BIN_DIR/data/filters" ] || [ -f "$SCRIPT_DIR/config.prop" ]; }; then
+  IS_UPGRADE=1
 fi
 
-# 解锁脚本防篡改保护
+# 解锁旧脚本防篡改保护（仅在确认备份完成后才会修改任何运行文件）
 if [ -d "$SCRIPT_DIR" ]; then
-    i18n_print "- Unlocking old script files" "- 正在解锁旧脚本文件"
-    find "$AGH_DIR/scripts" "$ADGPATH" -type f -name "*.sh" -exec chattr -i {} \; 2>/dev/null
+  i18n_print "- Unlocking old script files" "- 正在解锁旧脚本文件"
+  find "$AGH_DIR/scripts" "$ADGPATH" -type f -name "*.sh" -exec chattr -i {} \; 2>/dev/null
 fi
 
-# 清除旧模块残留与历史持久化数据库文件（新版采用 100% 纯内存环形统计与会话，零后台磁盘写 I/O）
-if [ -d "$AGH_DIR/ifw" ] || [ -d "$AGH_DIR/scripts" ] || [ -d "$BIN_DIR/agh_pid" ] || [ -d "$BIN_DIR/data/filters" ]; then
-  i18n_print "- Cleaning up old module residues" "- 正在清理旧模块残留"
-  rm -rf "$AGH_DIR/ifw" "$AGH_DIR/scripts" "$BIN_DIR/agh_pid" "$BIN_DIR/data/filters" "$AGH_DIR/datachart"* "$AGH_DIR/app_pause_active"
-  rm -f "$BIN_DIR/data/stats.db"* "$BIN_DIR/data/sessions.db"* "$BIN_DIR/data/querylog.json"* 2>/dev/null
+if [ "$IS_UPGRADE" -eq 1 ]; then
+  i18n_print "- Existing installation detected: creating dedicated upgrade backup" "- 检测到已有安装：正在创建本次升级专属备份"
+  UPGRADE_TS="$(date +%Y%m%d_%H%M%S 2>/dev/null || echo 0)_$$"
+  UPGRADE_BACKUP_DIR="$AGH_DIR/backup_upgrade_${UPGRADE_TS}"
+  if [ -e "$UPGRADE_BACKUP_DIR" ]; then
+    fail_install "Dedicated backup path already exists: $UPGRADE_BACKUP_DIR" "专属备份目录已存在: $UPGRADE_BACKUP_DIR"
+  fi
+  mkdir -p "$UPGRADE_BACKUP_DIR/bin" "$UPGRADE_BACKUP_DIR/scripts" "$UPGRADE_BACKUP_DIR/filters" "$UPGRADE_BACKUP_DIR/state" || \
+    fail_install "Failed to create dedicated backup directory" "创建本次升级专属备份目录失败"
+
+  # 1. 备份配置文件并校验存在性与完整性
+  if [ -f "$BIN_DIR/AdGuardHome.yaml" ]; then
+    copy_and_verify_file "$BIN_DIR/AdGuardHome.yaml" "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml" || \
+      fail_install "Failed to back up AdGuardHome.yaml" "备份 AdGuardHome.yaml 失败"
+  fi
+  if [ -f "$BIN_DIR/AdGuardHome.yaml.bak" ]; then
+    copy_and_verify_file "$BIN_DIR/AdGuardHome.yaml.bak" "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml.bak" || \
+      fail_install "Failed to back up AdGuardHome.yaml.bak" "备份 AdGuardHome.yaml.bak 失败"
+  fi
+  if [ -f "$SCRIPT_DIR/config.prop" ]; then
+    copy_and_verify_file "$SCRIPT_DIR/config.prop" "$UPGRADE_BACKUP_DIR/scripts/config.prop" || \
+      fail_install "Failed to back up config.prop" "备份 config.prop 失败"
+  fi
+  if [ -f "$SCRIPT_DIR/NoAdsService.sh" ]; then
+    copy_and_verify_file "$SCRIPT_DIR/NoAdsService.sh" "$UPGRADE_BACKUP_DIR/scripts/NoAdsService.sh" || \
+      fail_install "Failed to back up NoAdsService.sh" "备份 NoAdsService.sh 失败"
+  fi
+
+  # 2. 备份模块拥有的自定义状态资源（只处理模块自有路径，不触碰外部引用文件）
+  for state_f in app-allow.txt private_dns.bak; do
+    if [ -f "$AGH_DIR/$state_f" ]; then
+      copy_and_verify_file "$AGH_DIR/$state_f" "$UPGRADE_BACKUP_DIR/state/$state_f" || \
+        fail_install "Failed to back up $state_f" "备份 $state_f 失败"
+    fi
+  done
+  if [ -d "$AGH_DIR/proxy_ownership" ]; then
+    mkdir -p "$UPGRADE_BACKUP_DIR/state/proxy_ownership" || \
+      fail_install "Failed to create proxy_ownership backup dir" "创建代理归属记录备份目录失败"
+    for pof in "$AGH_DIR/proxy_ownership/"*; do
+      [ -f "$pof" ] || continue
+      copy_and_verify_file "$pof" "$UPGRADE_BACKUP_DIR/state/proxy_ownership/${pof##*/}" || \
+        fail_install "Failed to back up proxy ownership state" "备份代理归属记录失败"
+    done
+  fi
+
+  # 3. 完整备份当前设备侧订阅规则文件集合并记录清单
+  : > "$UPGRADE_BACKUP_DIR/filters.manifest" || \
+    fail_install "Failed to create filters manifest" "创建订阅备份清单失败"
+  if [ -d "$BIN_DIR/data/filters" ]; then
+    for ff in "$BIN_DIR/data/filters/"*; do
+      [ -f "$ff" ] || continue
+      fname="${ff##*/}"
+      copy_and_verify_file "$ff" "$UPGRADE_BACKUP_DIR/filters/$fname" || \
+        fail_install "Failed to back up filter file $fname" "备份订阅文件 $fname 失败"
+      printf '%s\n' "$fname" >> "$UPGRADE_BACKUP_DIR/filters.manifest" || \
+        fail_install "Failed to record filter manifest for $fname" "写入订阅清单 $fname 失败"
+    done
+  fi
+
+  # 4. 校验已有安装的配置有效性：若已有配置与备份均损坏，不得静默当成首次安装覆盖！
+  RESTORE_YAML=""
+  if [ -f "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml" ] && validate_yaml_candidate "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml"; then
+    RESTORE_YAML="$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml"
+  elif [ -f "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml.bak" ] && validate_yaml_candidate "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml.bak"; then
+    RESTORE_YAML="$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml.bak"
+    i18n_print "- Primary YAML invalid; using verified .bak from current install" "- 主配置无效，使用当前安装已验证的 .bak 备份"
+  else
+    fail_install "Existing AdGuardHome.yaml is missing or corrupted in upgrade path (refusing to overwrite with factory template)" "升级路径下现有 AdGuardHome.yaml 损坏且无有效 .bak（拒绝静默重置为出厂模板）"
+  fi
+
+  # 5. 先解压安装包内容至独立暂存目录，不直接覆盖运行目录
+  STAGE_DIR="$AGH_DIR/.stage_upgrade_${UPGRADE_TS}"
+  rm -rf "$STAGE_DIR" 2>/dev/null
+  mkdir -p "$STAGE_DIR" || fail_install "Failed to create staging directory" "创建升级暂存目录失败"
+  if ! unzip -q -o "$ZIPFILE" "scripts/*" -d "$STAGE_DIR" || \
+     ! unzip -q -o "$ZIPFILE" "bin/*" -d "$STAGE_DIR"; then
+    rm -rf "$STAGE_DIR" 2>/dev/null
+    fail_install "Failed to extract package files to staging directory" "解压升级包到暂存目录失败"
+  fi
+
+  for req_f in \
+    "$STAGE_DIR/bin/AdGuardHome" \
+    "$STAGE_DIR/bin/AdGuardHome_overseas.yaml" \
+    "$STAGE_DIR/bin/AdGuardHome_cn.yaml" \
+    "$STAGE_DIR/bin/default_user_rules.txt" \
+    "$STAGE_DIR/scripts/config.prop" \
+    "$STAGE_DIR/scripts/iptables.sh" \
+    "$STAGE_DIR/scripts/switch_mode.sh" \
+    "$STAGE_DIR/scripts/ProxyConfig.sh" \
+    "$STAGE_DIR/scripts/NoAdsService.sh"; do
+    if [ ! -s "$req_f" ]; then
+      rm -rf "$STAGE_DIR" 2>/dev/null
+      fail_install "Staged file missing or empty: $req_f" "暂存文件缺失或为空: $req_f"
+    fi
+  done
+
+  # 使用新核心再次验证待保留的用户配置兼容性
+  if ! validate_yaml_candidate "$RESTORE_YAML" "$STAGE_DIR/bin/AdGuardHome"; then
+    rm -rf "$STAGE_DIR" 2>/dev/null
+    fail_install "Existing configuration failed validation against new AdGuardHome binary" "现有配置未通过新核心兼容性校验"
+  fi
+
+  # 6. 仅更新程序文件、脚本与模式参考模板，跳过用户配置与规则目录覆盖
+  mkdir -p "$BIN_DIR" "$SCRIPT_DIR" "$BIN_DIR/data/filters" || {
+    rm -rf "$STAGE_DIR" 2>/dev/null
+    fail_install "Failed to prepare runtime directories" "准备运行目录失败"
+  }
+
+  for bin_item in AdGuardHome AdGuardHome_overseas.yaml AdGuardHome_cn.yaml default_user_rules.txt cacerts.pem; do
+    if [ -f "$STAGE_DIR/bin/$bin_item" ]; then
+      if ! copy_and_verify_file "$STAGE_DIR/bin/$bin_item" "$BIN_DIR/$bin_item"; then
+        rm -rf "$STAGE_DIR" 2>/dev/null
+        fail_install "Failed to update binary/template $bin_item" "更新程序文件 $bin_item 失败"
+      fi
+    fi
+  done
+
+  for sh_file in "$STAGE_DIR/scripts/"*.sh; do
+    [ -f "$sh_file" ] || continue
+    sh_name="${sh_file##*/}"
+    if ! copy_and_verify_file "$sh_file" "$SCRIPT_DIR/$sh_name"; then
+      rm -rf "$STAGE_DIR" 2>/dev/null
+      fail_install "Failed to update script $sh_name" "更新脚本 $sh_name 失败"
+    fi
+  done
+
+  # 合并 config.prop：以新模板为基础，保留用户原有的个人设置（RUN_MODE / ENABLE_SNI / VPN_DNS_TAKEOVER / PROXY_URL / redir_port）
+  STAGE_PROP="$STAGE_DIR/scripts/config.prop.merged"
+  STAGE_PROP_TMP="$STAGE_DIR/scripts/config.prop.tmp"
+  cp -f "$STAGE_DIR/scripts/config.prop" "$STAGE_PROP" || {
+    rm -rf "$STAGE_DIR" 2>/dev/null
+    fail_install "Failed to prepare merged config.prop" "准备合并 config.prop 失败"
+  }
+  if [ -f "$UPGRADE_BACKUP_DIR/scripts/config.prop" ]; then
+    if [ -n "$(tail -c 1 "$STAGE_PROP" 2>/dev/null || true)" ]; then
+      echo "" >> "$STAGE_PROP"
+    fi
+    old_url=$(sed -n 's/^PROXY_URL=//p' "$UPGRADE_BACKUP_DIR/scripts/config.prop" | head -n 1 | tr -d '"' | tr -d "'")
+    if [ -n "$old_url" ] && [ "$old_url" != " " ] && ! echo "$old_url" | grep -q "smjcdh\.top"; then
+      grep -v '^PROXY_URL=' "$STAGE_PROP" > "$STAGE_PROP_TMP" 2>/dev/null || true
+      mv -f "$STAGE_PROP_TMP" "$STAGE_PROP"
+      if [ -n "$(tail -c 1 "$STAGE_PROP" 2>/dev/null || true)" ]; then
+        echo "" >> "$STAGE_PROP"
+      fi
+      echo "PROXY_URL=\"$old_url\"" >> "$STAGE_PROP"
+      i18n_print "- Preserved PROXY_URL from existing config" "- 已保留原有 PROXY_URL"
+    fi
+    for key in VPN_DNS_TAKEOVER RUN_MODE ENABLE_SNI redir_port; do
+      old_val=$(sed -n "s/^${key}=//p" "$UPGRADE_BACKUP_DIR/scripts/config.prop" | head -n 1)
+      if [ -n "$old_val" ]; then
+        if grep -q "^${key}=" "$STAGE_PROP" 2>/dev/null; then
+          awk -v k="$key" -v v="$old_val" '
+            index($0, k "=") == 1 { print k "=" v; next }
+            { print $0 }
+          ' "$STAGE_PROP" > "$STAGE_PROP_TMP" && mv -f "$STAGE_PROP_TMP" "$STAGE_PROP"
+        else
+          echo "${key}=${old_val}" >> "$STAGE_PROP"
+        fi
+      fi
+    done
+  fi
+  if ! copy_and_verify_file "$STAGE_PROP" "$SCRIPT_DIR/config.prop"; then
+    rm -rf "$STAGE_DIR" 2>/dev/null
+    fail_install "Failed to write merged config.prop" "写入合并后的 config.prop 失败"
+  fi
+
+  # 7. 确保运行配置与升级前完全一致（不调用 switch_mode.sh 重写，不把配置强制同步为模板）
+  if ! copy_and_verify_file "$RESTORE_YAML" "$BIN_DIR/AdGuardHome.yaml" || \
+     ! copy_and_verify_file "$RESTORE_YAML" "$BIN_DIR/AdGuardHome.yaml.bak"; then
+    rm -rf "$STAGE_DIR" 2>/dev/null
+    fail_install "Failed to preserve AdGuardHome.yaml" "恢复并校验 AdGuardHome.yaml 失败"
+  fi
+
+  # 8. 确保订阅文件集合与升级前设备侧 100% 一致（精确按本次升级前清单对齐，不塞回已删默认文件，不覆盖同名已改文件）
+  rm -rf "$BIN_DIR/data/filters.rebuild.$$" 2>/dev/null || true
+  mkdir -p "$BIN_DIR/data/filters.rebuild.$$" || {
+    rm -rf "$STAGE_DIR" 2>/dev/null
+    fail_install "Failed to create filter verification directory" "创建订阅校验目录失败"
+  }
+  while IFS= read -r manifest_fname || [ -n "$manifest_fname" ]; do
+    [ -n "$manifest_fname" ] || continue
+    if ! copy_and_verify_file "$UPGRADE_BACKUP_DIR/filters/$manifest_fname" "$BIN_DIR/data/filters.rebuild.$$/$manifest_fname"; then
+      rm -rf "$BIN_DIR/data/filters.rebuild.$$" "$STAGE_DIR" 2>/dev/null
+      fail_install "Failed to restore filter $manifest_fname from dedicated backup" "从专属备份还原订阅 $manifest_fname 失败"
+    fi
+  done < "$UPGRADE_BACKUP_DIR/filters.manifest"
+  rm -rf "$BIN_DIR/data/filters" 2>/dev/null || true
+  mv -f "$BIN_DIR/data/filters.rebuild.$$" "$BIN_DIR/data/filters" || {
+    rm -rf "$STAGE_DIR" 2>/dev/null
+    fail_install "Failed to activate preserved filters directory" "启用已保留的订阅目录失败"
+  }
+
+  # 9. 清理历史遗留的无用缓存库与暂存目录，仅保留本次升级专属备份与最新备份软链
+  rm -rf "$STAGE_DIR" "$AGH_DIR/ifw" "$BIN_DIR/agh_pid" "$AGH_DIR/datachart"* "$AGH_DIR/app_pause_active" 2>/dev/null || true
+  rm -f "$BIN_DIR/data/stats.db"* "$BIN_DIR/data/sessions.db"* "$BIN_DIR/data/querylog.json"* 2>/dev/null || true
+  for old_bak in "$AGH_DIR"/backup_upgrade_*; do
+    [ -d "$old_bak" ] || continue
+    [ "$old_bak" = "$UPGRADE_BACKUP_DIR" ] && continue
+    rm -rf "$old_bak" 2>/dev/null || true
+  done
+
+else
+  # ==================== 首次安装路径 ====================
+  i18n_print "- Fresh installation: extracting default configuration and rules" "- 首次安装：正在解压默认配置与规则"
+  mkdir -p "$AGH_DIR" "$BIN_DIR" "$SCRIPT_DIR" || fail_install "Failed to create AGH_DIR" "创建模块运行目录失败"
+  unzip -q -o "$ZIPFILE" "scripts/*" -d "$AGH_DIR" || fail_install "Failed to extract scripts" "解压脚本文件失败"
+  unzip -q -o "$ZIPFILE" "bin/*" -d "$AGH_DIR" || fail_install "Failed to extract bin" "解压核心与规则文件失败"
+  if [ -s "$BIN_DIR/AdGuardHome.yaml" ]; then
+    cp -f "$BIN_DIR/AdGuardHome.yaml" "$BIN_DIR/AdGuardHome.yaml.bak" 2>/dev/null || true
+  fi
 fi
 
-# 创建目录并解压文件
-mkdir -p "$AGH_DIR" "$BIN_DIR" "$SCRIPT_DIR" "$BACKUP_DIR"
-i18n_print "- Extracting AdGuardHome files" "- 正在解压 AdGuardHome 文件"
-unzip -q -o "$ZIPFILE" "scripts/*" -d "$AGH_DIR"
-unzip -q -o "$ZIPFILE" "bin/*" -d "$AGH_DIR"
 i18n_print "- Setting permissions" "- 设置权限"
-find "$AGH_DIR" -type d -exec chmod 0700 {} \;
-chmod +x "$BIN_DIR/AdGuardHome" 
-chmod +x "$SCRIPT_DIR"/*.sh
-chown root:net_raw "$BIN_DIR/AdGuardHome"
+find "$AGH_DIR" -type d -exec chmod 0700 {} \; 2>/dev/null || true
+chmod +x "$BIN_DIR/AdGuardHome" || fail_install "Failed to chmod AdGuardHome" "设置核心执行权限失败"
+chmod +x "$SCRIPT_DIR"/*.sh || fail_install "Failed to chmod scripts" "设置脚本执行权限失败"
+chown root:net_raw "$BIN_DIR/AdGuardHome" 2>/dev/null || true
 
-# 立即执行一次性安全解锁与广告缓存清理（主用户，零死循环，解除所有历史锁死）
-sh "$SCRIPT_DIR/NoAdsService.sh" >/dev/null 2>&1
+# 立即执行一次性安全解锁与广告缓存清理（主用户，零死循环）
+sh "$SCRIPT_DIR/NoAdsService.sh" >/dev/null 2>&1 || true
 
 # 清理旧版本可能残留的冲突规则与策略路由
-ip rule del pref 99 2>/dev/null
-ip rule del pref 100 2>/dev/null
-ip rule del pref 101 2>/dev/null
-ip route flush table 61 2>/dev/null
+ip rule del pref 99 2>/dev/null || true
+ip rule del pref 100 2>/dev/null || true
+ip rule del pref 101 2>/dev/null || true
+ip route flush table 61 2>/dev/null || true
 while iptables -w 2 -D OUTPUT -p tcp --dport 853 -j REJECT 2>/dev/null; do :; done
 while iptables -w 2 -D OUTPUT -p udp --dport 853 -j REJECT 2>/dev/null; do :; done
 while iptables -w 2 -D OUTPUT -p tcp --dport 853 -j DROP 2>/dev/null; do :; done
@@ -108,120 +382,35 @@ while ip6tables -w 2 -D OUTPUT -p tcp --dport 853 -j REJECT 2>/dev/null; do :; d
 while ip6tables -w 2 -D OUTPUT -p udp --dport 853 -j REJECT 2>/dev/null; do :; done
 while ip6tables -w 2 -D OUTPUT -p udp --dport 443 -j REJECT 2>/dev/null; do :; done
 while iptables -w 2 -t mangle -D OUTPUT -j AGH_SNI 2>/dev/null; do :; done
-iptables -w 2 -t mangle -F AGH_SNI 2>/dev/null
-iptables -w 2 -t mangle -X AGH_SNI 2>/dev/null
+iptables -w 2 -t mangle -F AGH_SNI 2>/dev/null || true
+iptables -w 2 -t mangle -X AGH_SNI 2>/dev/null || true
 while ip6tables -w 2 -t mangle -D OUTPUT -j AGH_SNI 2>/dev/null; do :; done
-ip6tables -w 2 -t mangle -F AGH_SNI 2>/dev/null
-ip6tables -w 2 -t mangle -X AGH_SNI 2>/dev/null
+ip6tables -w 2 -t mangle -F AGH_SNI 2>/dev/null || true
+ip6tables -w 2 -t mangle -X AGH_SNI 2>/dev/null || true
 while iptables -w 2 -t filter -D OUTPUT -j AGH_SNI 2>/dev/null; do :; done
-iptables -w 2 -t filter -F AGH_SNI 2>/dev/null
-iptables -w 2 -t filter -X AGH_SNI 2>/dev/null
+iptables -w 2 -t filter -F AGH_SNI 2>/dev/null || true
+iptables -w 2 -t filter -X AGH_SNI 2>/dev/null || true
 while ip6tables -w 2 -t filter -D OUTPUT -j AGH_SNI 2>/dev/null; do :; done
-ip6tables -w 2 -t filter -F AGH_SNI 2>/dev/null
-ip6tables -w 2 -t filter -X AGH_SNI 2>/dev/null
+ip6tables -w 2 -t filter -F AGH_SNI 2>/dev/null || true
+ip6tables -w 2 -t filter -X AGH_SNI 2>/dev/null || true
 
-# 正在智能迁移与保留配置文件（保留个人自定义规则与开关，同时升级最新分流上游并清理已知问题规则）
-if [ -f "$BACKUP_DIR/AdGuardHome.yaml" ] && [ -f "$BIN_DIR/AdGuardHome.yaml" ]; then
-    # 1. 保留用户修改过的后台密码哈希
-    old_pwd=$(sed -n 's/^[[:space:]]*password:[[:space:]]*\(.*\)/\1/p' "$BACKUP_DIR/AdGuardHome.yaml" | head -n 1)
-    if [ -n "$old_pwd" ]; then
-        escaped_pwd=$(printf '%s' "$old_pwd" | sed 's/[&|]/\\&/g')
-        sed -i "s|^\([[:space:]]*password:[[:space:]]*\).*|\1$escaped_pwd|" "$BIN_DIR/AdGuardHome.yaml" 2>/dev/null
-    fi
-    # 2. 提取用户在旧版中自行添加的自定义规则，使用 awk 严格按 2 空格缩进合并至新版配置 ^filtering: 之前（彻底杜绝 BusyBox sed i\ 吞空格导致 YAML 损坏）
-    awk -v sq="'" '
-        FILENAME == ARGV[1] {
-            gsub(/\r$/, "")
-            if ($0 != "") known[$0] = 1
-            next
-        }
-        FILENAME == ARGV[2] {
-            if (/^user_rules:/) { in_old = 1; next }
-            if (in_old && /^[a-zA-Z_]+:/) { in_old = 0 }
-            if (in_old && /^[[:space:]]*-[[:space:]]*/) {
-                rule = $0
-                sub(/^[[:space:]]*-[[:space:]]*/, "", rule)
-                sub(sq "[[:space:]]*#.*$", sq, rule)
-                if (substr(rule, 1, 1) == sq && substr(rule, length(rule), 1) == sq) {
-                    rule = substr(rule, 2, length(rule) - 2)
-                } else if (substr(rule, 1, 1) == "\"" && substr(rule, length(rule), 1) == "\"") {
-                    rule = substr(rule, 2, length(rule) - 2)
-                }
-                gsub(/[[:space:]]+$/, "", rule)
-                gsub(sq sq, sq, rule)
-                if (rule != "" && !(rule in known) && rule !~ /^#/ && rule !~ /1e100\.net|oschina\.net|in-addr\.arpa|@@\|\|googleapis\.com\^\$important|@@\|\|app-measurement\.com|@@\|\|crashlytics\.com|@@\|\|xp\.apple\.com|\|\|update\.googleapis\.com|\|\|ad\.\*\^/) {
-                    known[rule] = 1
-                    extra[++n] = rule
-                }
-            }
-            next
-        }
-        FILENAME == ARGV[3] {
-            if (/^filtering:/) {
-                for (i = 1; i <= n; i++) {
-                    r = extra[i]
-                    gsub(sq, sq sq, r)
-                    printf "  - %s%s%s\n", sq, r, sq
-                }
-            }
-            print $0
-        }
-    ' "$BIN_DIR/default_user_rules.txt" "$BACKUP_DIR/AdGuardHome.yaml" "$BIN_DIR/AdGuardHome.yaml" > "$BIN_DIR/AdGuardHome.yaml.tmp" 2>/dev/null
-    if [ -s "$BIN_DIR/AdGuardHome.yaml.tmp" ] && grep -q '^schema_version:' "$BIN_DIR/AdGuardHome.yaml.tmp" 2>/dev/null; then
-        mv -f "$BIN_DIR/AdGuardHome.yaml.tmp" "$BIN_DIR/AdGuardHome.yaml"
-    else
-        rm -f "$BIN_DIR/AdGuardHome.yaml.tmp"
-    fi
+proxy_url_chk=$(sed -n 's/^PROXY_URL=//p' "$SCRIPT_DIR/config.prop" 2>/dev/null | tr -d '"' | tr -d "'" | tr -d '[:space:]' || true)
+if [ -n "$proxy_url_chk" ]; then
+  sh "$SCRIPT_DIR/ProxyConfig.sh" --once >/dev/null 2>&1 || true
 fi
 
-if [ -f "$BACKUP_DIR/config.prop" ]; then
-    [ -n "$(tail -c 1 "$SCRIPT_DIR/config.prop" 2>/dev/null)" ] && echo "" >> "$SCRIPT_DIR/config.prop"
-    old_url=$(sed -n 's/^PROXY_URL=//p' "$BACKUP_DIR/config.prop" | tr -d '"' | tr -d "'")
-    if [ -n "$old_url" ] && [ "$old_url" != " " ] && ! echo "$old_url" | grep -q "smjcdh\.top"; then
-        sed -i "/^PROXY_URL=/d" "$SCRIPT_DIR/config.prop"
-        [ -n "$(tail -c 1 "$SCRIPT_DIR/config.prop" 2>/dev/null)" ] && echo "" >> "$SCRIPT_DIR/config.prop"
-        echo "PROXY_URL=\"$old_url\"" >> "$SCRIPT_DIR/config.prop"
-        i18n_print "- Preserved PROXY_URL from backup" "- 已从备份恢复 PROXY_URL"
-    fi
-    for key in VPN_DNS_TAKEOVER RUN_MODE; do
-        old_val=$(sed -n "s/^${key}=//p" "$BACKUP_DIR/config.prop" | head -n 1)
-        if [ -n "$old_val" ]; then
-            sed -i "s|^${key}=.*|${key}=${old_val}|" "$SCRIPT_DIR/config.prop" 2>/dev/null
-        fi
-    done
-fi
-active_mode=$(sed -n 's/^RUN_MODE=//p' "$SCRIPT_DIR/config.prop" | head -n 1)
-[ -z "$active_mode" ] && active_mode="overseas"
-if [ "$active_mode" = "cn" ]; then
-    sh "$SCRIPT_DIR/switch_mode.sh" cn --no-restart >/dev/null 2>&1
-fi
-sh "$SCRIPT_DIR/ProxyConfig.sh" --once >/dev/null 2>&1
 # 安装 AdGuard Home 管理器 APP 到手机主用户 (User 0)
+# 保持相同包名与签名覆盖升级，绝不卸载不属于本模块的应用，也不清除用户数据掩盖失败
 if [ -f "$MODPATH/AdGuardHomeManager.apk" ]; then
-    # 自动卸载原版未魔改的 JGeek00 上游旧应用，杜绝桌面上产生 2 个同名管理工具
-    pm uninstall --user 0 com.jgeek00.adguard_home_manager >/dev/null 2>&1
-    
-    # 优先安装到主用户 (user 0)
-    install_res=$(pm install -r -d -g --user 0 "$MODPATH/AdGuardHomeManager.apk" 2>&1)
-    if ! echo "$install_res" | grep -q "Success"; then
-        install_res=$(pm install -r -d -g "$MODPATH/AdGuardHomeManager.apk" 2>&1)
-    fi
-
-    # 如果由于签名变更或降级限制导致失败，自动清理旧包重新安装
-    if ! echo "$install_res" | grep -q "Success"; then
-        if echo "$install_res" | grep -q -i -E "INCOMPATIBLE|SIGNATURE|CONFLICT|FAILED"; then
-            pm uninstall --user 0 com.wu.adgogogo >/dev/null 2>&1
-            pm uninstall com.wu.adgogogo >/dev/null 2>&1
-            install_res=$(pm install -r -d -g --user 0 "$MODPATH/AdGuardHomeManager.apk" 2>&1)
-            if ! echo "$install_res" | grep -q "Success"; then
-                install_res=$(pm install -r -d -g "$MODPATH/AdGuardHomeManager.apk" 2>&1)
-            fi
-        fi
-    fi
-
-    if echo "$install_res" | grep -q "Success"; then
-        rm -f "$MODPATH/AdGuardHomeManager.apk"
-    fi
+  install_res=$(pm install -r -d -g --user 0 "$MODPATH/AdGuardHomeManager.apk" 2>&1 || true)
+  if ! echo "$install_res" | grep -q "Success"; then
+    install_res=$(pm install -r -d -g "$MODPATH/AdGuardHomeManager.apk" 2>&1 || true)
+  fi
+  if echo "$install_res" | grep -q "Success"; then
+    rm -f "$MODPATH/AdGuardHomeManager.apk"
+  else
+    i18n_print "! Warning: Manager APK install returned: $install_res (APK kept in $MODPATH/AdGuardHomeManager.apk)" "! 警告: 管理器 APK 自动安装未成功 ($install_res)，安装包已保留在 $MODPATH/AdGuardHomeManager.apk"
+  fi
 fi
 
 i18n_print "- Installation complete. Reboot device." "- 安装完成，请重启设备。"

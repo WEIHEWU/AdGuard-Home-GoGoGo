@@ -1,6 +1,11 @@
 name: Publish Release
 
 on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -15,7 +20,10 @@ jobs:
 
       - name: Build Unified Flashable Package
         run: |
-          VERSION_TAG="${GITHUB_REF_NAME:-v20261113.1}"
+          case "${GITHUB_REF_NAME:-}" in
+            v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
+            *)  VERSION_TAG="v20261113.1" ;;
+          esac
           VERSION_DATE="${VERSION_TAG#v}"
           chmod +x ./build.sh
           ./build.sh "$VERSION_DATE"
@@ -27,7 +35,27 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.VERSION_TAG }}
-          name: "AdGuard Home GoGoGo ${{ env.VERSION_TAG }} (Full-Strength DNS + SNI Core)"
+          name: "AdGuard Home GoGoGo ${{ env.VERSION_TAG }} (Dual-Port SNI & Full Closed-Loop Edition)"
+          body: |
+            ### 🚀 AdGuard Home GoGoGo `v20261113.1` (集百家之长 · 性能、耗电与软重启稳定加固版)
+
+            基于 `v20261113.1` 双引擎核心（100% 保持全部广告规则、白名单、过滤语义、双端口 SNI 与 VPN 策略不变），完成全链路性能、内存、并发可靠性与代理联动安全补修：
+
+            1. **🛡️ 升级不覆盖设备规则 + 白名单级无损热切换 (`customize.sh` / `switch_mode.sh`)**：
+               - 刷机升级明确区分首次安装与覆盖升级，采用当次独立备份完整保留设备现有订阅规则文件集合（含同名订阅修改、用户新增订阅及已删默认订阅状态）与 `AdGuardHome.yaml`，检测到冲突 hosts 模块或备份失败时立即中止且不留残留标记；
+               - 海外/国内模式切换前先停止核心并重读其停机落盘配置，**仅按白名单更新 `RUN_MODE`、`VPN_COMPANION_MODE`、预设默认上游 DNS 与预设订阅加速源**，100% 保留自定义规则、自建订阅与非预设 DNS 设置，失败自动回滚。
+            2. **🔗 第三方代理配置联动归属追踪与事务回滚 (`ProxyConfig.sh`)**：
+               - 完整支持 `nameserver: []` 空数组、`nameserver:` 空映射及多目标 DNS 段注入，注入前严格校验候选配置确实包含 `127.0.0.1:<redir_port>` 且不污染 `fallback` 等非目标段；
+               - 消除“先改目标配置、后写归属记录”窗口：先校验 `.orig` 备份并预写校验 `<key>.meta.tmp.<pid>` 全部字段，再原子替换目标配置与正式 `.meta`（若元数据提交或校验失败立即从 `.orig` 自动回滚，回滚也失败时完整保留恢复依据并阻断误报）；
+               - `--clean` 清理时：无归属记录的文件保持原状不猜测还原；外部二次修改后的文件仅增量移除本模块注入项并校验落盘结果后才删除恢复记录。
+            3. **⚡ 临时 Root 软重启就绪等待、内核 `flock` 并发互斥与单次刷表 (`service.sh` / `iptables.sh`)**：
+               - 软重启后自动等待系统与数据分区就绪，合并启动及切模流程中的重复 `iptables` 刷表为单次原子挂载，缓存 `ip6tables` 探测结果并消除巡检空转外部命令开销；
+               - 全面采用内核 `flock` 保护服务操作与防火墙刷表（后台守护进程启动前显式关闭锁 FD 防继承），支持信号中断时的活动子进程回收与真实失败码透传。
+            4. **🧠 定制核心 (`AdGuard-Home-GoGoGo-Core`) 与配套管理器 (`v2.24.18`) 协同省电**：
+               - 核心：环形查询日志 (`2016 -> 2000` 高水位截断) 与统计切片底层数组按需收缩防内存滞留、过期会话惰性清理、DoH 响应体 `io.LimitReader` 排空复用 HTTP/2 连接；
+               - 管理器：引入目标感知有序模式切换队列（相同目标合并共享、不同目标按序串行執行、超时不破坏互斥锁）、Root 探测缓存与熔断、状态栏快捷磁贴 (`AGH GoGoGo`) 超时强制回收，以及退至后台/锁屏时自动暂停轮询。
+            5. **🔒 `443` + `8443` 双端口首包级低功耗 SNI 嗅探 + 私人 DNS 闭环 + `1,764` 条精校规则**：
+               - 保持 `443/8443` `connbytes 1:4` 首包 NFQUEUE 嗅探、系统私人 DNS (`private_dns_mode`) 备份与停机还原、以及多用户 `*==deleted==` 残留目录自愈清理。
           files: |
             releases/AdGuard_Home_gogogo_${{ env.VERSION_DATE }}.zip
             releases/AdGuardHomeManager.apk

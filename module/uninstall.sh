@@ -4,14 +4,17 @@ ADGPATH="/data/adb/modules/AdGuardHome"
 PROXY_SCRIPT="$AGH_DIR/scripts/ProxyConfig.sh"
 
 # 1. 检查并强制停止所有 AdGuardHome 及关联守护进程 (极速干净退出)
-for pid_f in /dev/shm/agh_watchdog.pid "$AGH_DIR/run/agh_watchdog.pid"; do
+for pid_f in /dev/shm/agh_watchdog.pid "$AGH_DIR/run/agh_watchdog.pid" \
+             /dev/shm/agh_op.pid "$AGH_DIR/run/agh_op.pid" \
+             /dev/shm/agh_watchdog.lock/pid "$AGH_DIR/run/agh_watchdog.lock/pid"; do
     if [ -f "$pid_f" ]; then
         old_wd=$(cat "$pid_f" 2>/dev/null)
         [ -n "$old_wd" ] && kill -9 "$old_wd" 2>/dev/null
         rm -f "$pid_f" 2>/dev/null
     fi
 done
-rm -f /dev/shm/agh_watchdog.lock /dev/shm/agh_manual_stop 2>/dev/null
+rm -rf /dev/shm/agh_watchdog.flock /dev/shm/agh_op.flock /dev/shm/agh_watchdog.lock /dev/shm/agh_op.lock /dev/shm/agh_manual_stop \
+       "$AGH_DIR/run/agh_watchdog.flock" "$AGH_DIR/run/agh_op.flock" "$AGH_DIR/run/agh_watchdog.lock" "$AGH_DIR/run/agh_op.lock" "$AGH_DIR/run/agh_manual_stop" 2>/dev/null
 pkill -f "/AdGuardHome/service.sh.*--watchdog" 2>/dev/null
 killall -9 AdGuardHome 2>/dev/null
 for pid in $(pidof AdGuardHome 2>/dev/null); do kill -9 "$pid" 2>/dev/null; done
