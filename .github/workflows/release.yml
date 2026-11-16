@@ -22,7 +22,7 @@ jobs:
         run: |
           case "${GITHUB_REF_NAME:-}" in
             v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
-            *)  VERSION_TAG="v20261116.2-rc.1" ;;
+            *)  VERSION_TAG="v20261116.2-rc.2" ;;
           esac
           VERSION_DATE="${VERSION_TAG#v}"
           case "$VERSION_TAG" in
@@ -47,14 +47,14 @@ jobs:
           body: |
             ### 🚀 AdGuard Home GoGoGo `${{ env.VERSION_TAG }}` (Candidate / Pre-release)
 
-            基于既有满血 DNS + SNI (`443`/`8443`) 双链架构（100% 保持全部过滤订阅、默认规则、DNS 上游与 SNI 检查范围不变），集成 **[AdGuard-Home-GoGoGo-Core v2026-11-16-rc.1](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core)** 与 **[AdGuard-Home-GoGoGo-Manager v2.24.22](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager)**：
+            基于既有满血 DNS + SNI (`443`/`8443`) 双链架构（100% 保持全部过滤订阅、默认规则、DNS 上游与 SNI 检查范围不变），集成 **[AdGuard-Home-GoGoGo-Core v2026-11-16-rc.2](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core)** 与 **[AdGuard-Home-GoGoGo-Manager v2.24.23-rc.1](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager)**：
 
-            > ⚠️ Candidate pre-release: Core race/unit/android_slim tests, Manager static analysis & 31 unit/widget/HTTP tests, and module shell sandbox regression suite (TEST 1-9) all passed; real-device interactive testing on Android is pending.
+            > ⚠️ Candidate pre-release: Core race/unit/android_slim (Linux ARM64) tests, Manager static analysis & 34 unit/widget/HTTP mock tests, and module shell sandbox regression suite (TEST 1-9) all passed; real-device interactive testing on Android is pending.
 
-            1. **🔍 Core + Manager 误杀排错联动升级 (`snifilter` / `querylog` / 排查弹窗)**:
-               - 核心确保 SNI 拦截准确记录 `FilteredSNI`、`rules[]` 与真实 ClientHello SNI，`ShouldLog` 遵循客户端忽略与 IP 匿名设置，原子防重避免重试产生重复事件，暂停保护时仅做规则预测 (`NotFilteredSNI` + `predicted_blocked=true`) 而不冒充真实拦截；
-               - 新增有界纯内存最近拦截摘要 `/control/querylog/blocked_summary`（5 分钟 / 上限 256 条），防止高频重试挤掉关键单次拦截事件；
-               - 管理器新增离线严格域名解析（支持多级 PSL 边界保护）、`check_host` 批量多级父域辅助检测、默认同秒聚合展示与安全两级加白闭环（保留原有规则顺序、写入回读校验、清缓存、复检辨别 `$important` 与一键撤销）。
+            1. **🔍 Core + Manager 误杀排错补修升级 (`rc.2`)**:
+               - 核心新增 `/control/filtering/set_rules` 原子 `expected_revision` 条件更新与 `409` 并发冲突保护，并补齐 `android_slim` 下 `querylog`/`snifilter` 实测覆盖（含 `FilteredSNI`、`blocked_summary` 容量/过期/匿名化与隐私策略）；
+               - 管理器内置完整版本化离线 PSL（ICANN + PRIVATE + 通配 + 例外规则，未知后缀禁用宽范围放行），严格分项核验写后 `A` / `AAAA` 与缓存刷新结果，统一跨入口服务器共享写队列并支持可核验撤销归属防误删；
+               - 继续保留拦截摘要、最近拦截同秒聚合、两级安全加白与 `$important` 识别。
             2. **🧰 模块调试日志开关与一键诊断包 (`diag_log.sh` / 管理器诊断页)**:
                - 默认关闭、按分钟自动过期、采用独立日志锁先行开档的短事务轮转日志；
                - 管理器一键导出全链路脱敏（含日志前缀/续行凭据、超时部分保留与子进程完整回收）诊断 ZIP 并调用系统分享。
