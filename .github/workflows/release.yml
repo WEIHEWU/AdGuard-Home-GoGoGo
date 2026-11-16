@@ -22,7 +22,7 @@ jobs:
         run: |
           case "${GITHUB_REF_NAME:-}" in
             v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
-            *)  VERSION_TAG="v20261116.2-rc.4" ;;
+            *)  VERSION_TAG="v20261116.2-rc.5" ;;
           esac
           VERSION_DATE="${VERSION_TAG#v}"
           case "$VERSION_TAG" in
@@ -47,18 +47,16 @@ jobs:
           body: |
             ### 🚀 AdGuard Home GoGoGo `${{ env.VERSION_TAG }}` (Candidate / Pre-release)
 
-            基于既有满血 DNS + SNI (`443`/`8443`) 双链架构（100% 保持全部过滤订阅、默认规则、DNS 上游与 SNI 检查范围不变），集成 **[AdGuard-Home-GoGoGo-Core v2026-11-16-rc.3](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core)** 与 **[AdGuard-Home-GoGoGo-Manager v2.24.25-rc.1](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager)**：
+            基于既有满血 DNS + SNI (`443`/`8443`) 双链架构（100% 保持全部过滤订阅、默认规则、DNS 上游与 SNI 检查范围不变），集成 **[AdGuard-Home-GoGoGo-Core v2026-11-16-rc.3](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core)** 与 **[AdGuard-Home-GoGoGo-Manager v2.24.26-rc.1](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager)**：
 
-            > ⚠️ Candidate pre-release: Core race/unit/android_slim (Linux ARM64) tests unchanged at `v2026-11-16-rc.3`, Manager static analysis & 43 unit/widget/HTTP mock tests, and module shell sandbox regression suite passed; real-device interactive testing on Android is pending.
+            > ⚠️ Candidate pre-release: Core race/unit/android_slim (Linux ARM64) tests unchanged at `v2026-11-16-rc.3`, Manager static analysis & 46 unit/widget/HTTP mock tests passed; real-device interactive testing on Android is pending.
 
-            1. **🏷️ 通用手动规则来源标记与“我的手动规则”管理 (`Manager v2.24.25-rc.1`)**:
-               - 覆盖误杀排错、日志详情拦截/放行、自定义规则单条添加、批量编辑（多重集合精确行差异）与明确移除全入口，统一经由服务器共享写队列、`expected_revision` 与写后回读确认后再保存到本地 `filesDir` 原子存储（按服务器隔离，支持 JSON 备份导出/导入且绝不含服务器凭据）；
-               - 清晰区分`手动放行` / `手动拦截` / `手动规则` / `用户认领` / 订阅名 / `来源未记录` / `来源未确认` / `归属未确认`，新增集中管理页支持本地备注、仅移除管理记录保留规则、“检查是否生效”（实时 `A`/`AAAA` 探活）与二次确认移除；
-            2. **🔍 Core + Manager 误杀排错补修升级 (`rc.2`/`rc.3`)**:
-               - 核心新增 `/control/filtering/set_rules` 原子 `expected_revision` 条件更新与 `409` 并发冲突保护，并支持基于 `X-User-Rules-Revision` 与核心实例 ID 的可核验撤销归属防误删；
-               - 管理器内置完整版本化离线 PSL、严格分项核验写后 `A` / `AAAA` 与缓存刷新结果，保留拦截摘要与两级安全加白。
-            3. **🧰 模块调试日志开关、一键诊断包与模式切换单调计时**:
-               - 默认关闭、按分钟自动过期、采用独立日志锁先行开档的短事务轮转日志与脱敏诊断 ZIP 分享（不含手动规则与备注隐私内容）。
+            1. **🏷️ 手动规则来源精准绑定补修 (`Manager v2.24.26-rc.1`)**:
+               - 提交绑定差异记录：所有来源录入仅计算“提交前 → 实际提交”差异并严格校对 `X-User-Rules-Revision` 与回读全量一致；若并发被打断，绝不把外部规则记为手动操作，明确提示被打断；
+               - 区分“历史来源（手动新增 / 用户认领）”与“当前关联（已确认 / 已不存在 / 待确认 / 重复歧义）”：未观测外部变更、删除再重加、核心重启或重复行变化一律降为待确认或重复歧义，保留历史信息且绝不靠同文本自动绑定；
+               - 备份导入严格校验枚举、禁止覆盖本地已有可信`已确认`记录，新导入默认`待确认`且绝不自证或创建 Core 规则。
+            2. **🔍 Core + Manager 误杀排错、诊断包与切换计时 (`rc.2`/`rc.3`)**:
+               - 继续完整保留既有核验撤销归属、离线 PSL、短事务轮转日志、脱敏诊断 ZIP 与单调切换计时，核心与默认规则均保持零改动。
           files: |
             releases/AdGuard_Home_gogogo_${{ env.VERSION_DATE }}.zip
             releases/AdGuardHomeManager.apk
