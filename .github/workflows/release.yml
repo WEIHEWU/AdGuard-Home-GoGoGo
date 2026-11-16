@@ -22,40 +22,44 @@ jobs:
         run: |
           case "${GITHUB_REF_NAME:-}" in
             v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
-            *)  VERSION_TAG="v20261116.1" ;;
+            *)  VERSION_TAG="v20261116.2-rc.1" ;;
           esac
           VERSION_DATE="${VERSION_TAG#v}"
+          case "$VERSION_TAG" in
+            *-rc*|*beta*|*candidate*) IS_PRERELEASE="true"; MAKE_LATEST="false" ;;
+            *)                       IS_PRERELEASE="false"; MAKE_LATEST="true" ;;
+          esac
           chmod +x ./build.sh
           ./build.sh "$VERSION_DATE"
           cp -f module/AdGuardHomeManager.apk releases/AdGuardHomeManager.apk
           echo "VERSION_TAG=$VERSION_TAG" >> "$GITHUB_ENV"
           echo "VERSION_DATE=$VERSION_DATE" >> "$GITHUB_ENV"
+          echo "IS_PRERELEASE=$IS_PRERELEASE" >> "$GITHUB_ENV"
+          echo "MAKE_LATEST=$MAKE_LATEST" >> "$GITHUB_ENV"
 
       - name: Create GitHub Release and Upload Packages
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.VERSION_TAG }}
-          name: "AdGuard Home GoGoGo ${{ env.VERSION_TAG }} (Performance, Power & Soft-Reboot Stability Edition)"
+          name: "AdGuard Home GoGoGo ${{ env.VERSION_TAG }} (False-Positive Diagnostics & Debug Bundle Edition)"
+          prerelease: ${{ env.IS_PRERELEASE == 'true' }}
+          make_latest: ${{ env.MAKE_LATEST }}
           body: |
-            ### 🚀 AdGuard Home GoGoGo `v20261116.1` (集百家之长 · 性能、耗电与软重启稳定加固版)
+            ### 🚀 AdGuard Home GoGoGo `${{ env.VERSION_TAG }}` (Candidate / Pre-release)
 
-            基于 `v20261113.1` 双引擎核心（100% 保持全部广告规则、白名单、过滤语义、双端口 SNI 与 VPN 策略不变），完成全链路性能、内存、并发可靠性与代理联动安全补修，并内置最新 **[AdGuard-Home-GoGoGo Manager v2.24.19](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager)**：
+            基于既有满血 DNS + SNI (`443`/`8443`) 双链架构（100% 保持全部过滤订阅、默认规则、DNS 上游与 SNI 检查范围不变），集成 **[AdGuard-Home-GoGoGo-Core v2026-11-16-rc.1](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core)** 与 **[AdGuard-Home-GoGoGo-Manager v2.24.22](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager)**：
 
-            1. **🛡️ 升级不覆盖设备规则 + 白名单级无损热切换 (`customize.sh` / `switch_mode.sh`)**：
-               - 刷机升级明确区分首次安装与覆盖升级，采用当次独立备份完整保留设备现有订阅规则文件集合（含同名订阅修改、用户新增订阅及已删默认订阅状态）与 `AdGuardHome.yaml`，检测到冲突 hosts 模块或备份失败时立即中止且不留残留标记；
-               - 海外/国内模式切换前先停止核心并重读其停机落盘配置，**仅按白名单更新 `RUN_MODE`、`VPN_COMPANION_MODE`、预设默认上游 DNS 与预设订阅加速源**，100% 保留自定义规则、自建订阅与非预设 DNS 设置，失败自动回滚。
-            2. **🔗 第三方代理配置联动归属追踪与事务回滚 (`ProxyConfig.sh`)**：
-               - 完整支持 `nameserver: []` 空数组、`nameserver:` 空映射及多目标 DNS 段注入，注入前严格校验候选配置确实包含 `127.0.0.1:<redir_port>` 且不污染 `fallback` 等非目标段；
-               - 消除“先改目标配置、后写归属记录”窗口：先校验 `.orig` 备份并预写校验 `<key>.meta.tmp.<pid>` 全部字段，再原子替换目标配置与正式 `.meta`（若元数据提交或校验失败立即从 `.orig` 自动回滚，回滚也失败时完整保留恢复依据并阻断误报）；
-               - `--clean` 清理时：无归属记录的文件保持原状不猜测还原；外部二次修改后的文件仅增量移除本模块注入项并校验落盘结果后才删除恢复记录。
-            3. **⚡ 临时 Root 软重启就绪等待、内核 `flock` 并发互斥与单次刷表 (`service.sh` / `iptables.sh`)**：
-               - 软重启后自动等待系统与数据分区就绪，合并启动及切模流程中的重复 `iptables` 刷表为单次原子挂载，缓存 `ip6tables` 探测结果并消除巡检空转外部命令开销；
-               - 全面采用内核 `flock` 保护服务操作与防火墙刷表（后台守护进程启动前显式关闭锁 FD 防继承），支持信号中断时的活动子进程回收与真实失败码透传。
-            4. **🧠 定制核心 (`AdGuard-Home-GoGoGo-Core`) 与配套管理器 (`v2.24.19`) 协同省电**：
-               - 核心：环形查询日志 (`2016 -> 2000` 高水位截断) 与统计切片底层数组按需收缩防内存滞留、过期会话惰性清理、DoH 响应体 `io.LimitReader` 排空复用 HTTP/2 连接；
-               - 管理器 (`v2.24.19`, `versionCode 185`)：引入目标感知有序模式切换队列（相同目标合并共享、不同目标按序串行执行、超时不破坏互斥锁）、Root 探测缓存与熔断、状态栏快捷磁贴 (`AGH GoGoGo`) 超时强制回收，以及退至后台/锁屏时自动暂停轮询。
-            5. **🔒 `443` + `8443` 双端口首包级低功耗 SNI 嗅探 + 私人 DNS 闭环 + `1,764` 条精校规则**：
-               - 保持 `443/8443` `connbytes 1:4` 首包 NFQUEUE 嗅探、系统私人 DNS (`private_dns_mode`) 备份与停机还原、以及多用户 `*==deleted==` 残留目录自愈清理。
+            > ⚠️ Candidate pre-release: Core race/unit/android_slim tests, Manager static analysis & 31 unit/widget/HTTP tests, and module shell sandbox regression suite (TEST 1-9) all passed; real-device interactive testing on Android is pending.
+
+            1. **🔍 Core + Manager 误杀排错联动升级 (`snifilter` / `querylog` / 排查弹窗)**:
+               - 核心确保 SNI 拦截准确记录 `FilteredSNI`、`rules[]` 与真实 ClientHello SNI，`ShouldLog` 遵循客户端忽略与 IP 匿名设置，原子防重避免重试产生重复事件，暂停保护时仅做规则预测 (`NotFilteredSNI` + `predicted_blocked=true`) 而不冒充真实拦截；
+               - 新增有界纯内存最近拦截摘要 `/control/querylog/blocked_summary`（5 分钟 / 上限 256 条），防止高频重试挤掉关键单次拦截事件；
+               - 管理器新增离线严格域名解析（支持多级 PSL 边界保护）、`check_host` 批量多级父域辅助检测、默认同秒聚合展示与安全两级加白闭环（保留原有规则顺序、写入回读校验、清缓存、复检辨别 `$important` 与一键撤销）。
+            2. **🧰 模块调试日志开关与一键诊断包 (`diag_log.sh` / 管理器诊断页)**:
+               - 默认关闭、按分钟自动过期、采用独立日志锁先行开档的短事务轮转日志；
+               - 管理器一键导出全链路脱敏（含日志前缀/续行凭据、超时部分保留与子进程完整回收）诊断 ZIP 并调用系统分享。
+            3. **⏱️ 模式切换阶段单调计时与等效自检补修 (`switch_mode.sh` / `service.sh` / `iptables.sh`)**:
+               - 父 Shell 统一初始化单调时钟并在子脚本继承，消除重复配置校验，并在单次 `post_apply_check` 完整核对 `443`/`8443` NFQUEUE、`--queue-bypass` 与核心 GID `23333` 豁免。
           files: |
             releases/AdGuard_Home_gogogo_${{ env.VERSION_DATE }}.zip
             releases/AdGuardHomeManager.apk

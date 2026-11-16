@@ -72,6 +72,15 @@ safe_sleep() {
     return 1
 }
 
+SCRIPT_LABEL="service.sh"
+resolve_abs_path() {
+    p="$1"
+    case "$p" in
+        /*) printf '%s\n' "$p" ;;
+        *)  printf '%s/%s\n' "$(pwd 2>/dev/null || echo /)" "$p" ;;
+    esac
+}
+
 # 初始化运行状态与锁目录（支持 RUN_DIR 覆盖以便隔离测试）
 if [ -z "${RUN_DIR:-}" ]; then
     mkdir -p /dev/shm 2>/dev/null
@@ -85,87 +94,512 @@ if [ -z "${RUN_DIR:-}" ]; then
 else
     mkdir -p "$RUN_DIR" 2>/dev/null
 fi
+RUN_DIR="$(cd "$RUN_DIR" 2>/dev/null && pwd || resolve_abs_path "$RUN_DIR")"
 
-WATCHDOG_LOCK_FILE="$RUN_DIR/agh_watchdog.flock"
-WATCHDOG_PID_FILE="$RUN_DIR/agh_watchdog.pid"
-OP_LOCK_FILE="$RUN_DIR/agh_op.flock"
-OP_LOCK_DIAG_PID_FILE="$RUN_DIR/agh_op.pid"
-SESSION_STOP_FILE="$RUN_DIR/agh_manual_stop"
-IPV6_DNS_MODE_FILE="$RUN_DIR/agh_ipv6_dns_mode"
-SNI_FW_MODE_FILE="$RUN_DIR/agh_sni_fw_mode"
+WATCHDOG_LOCK_FILE="$(resolve_abs_path "$RUN_DIR/agh_watchdog.flock")"
+WATCHDOG_PID_FILE="$(resolve_abs_path "$RUN_DIR/agh_watchdog.pid")"
+OP_LOCK_FILE="$(resolve_abs_path "$RUN_DIR/agh_op.flock")"
+OP_LOCK_DIAG_PID_FILE="$(resolve_abs_path "$RUN_DIR/agh_op.pid")"
+SESSION_STOP_FILE="$(resolve_abs_path "$RUN_DIR/agh_manual_stop")"
+IPV6_DNS_MODE_FILE="$(resolve_abs_path "$RUN_DIR/agh_ipv6_dns_mode")"
+SNI_FW_MODE_FILE="$(resolve_abs_path "$RUN_DIR/agh_sni_fw_mode")"
 
 # 系统语言检测
 locale=$(getprop persist.sys.locale 2>/dev/null)
 [ -z "$locale" ] && locale="zh"
 case "$locale" in zh*) lang=zh ;; *) lang=en ;; esac
 
+if [ -f "$SCRIPT_DIR/diag_log.sh" ]; then
+    . "$SCRIPT_DIR/diag_log.sh"
+elif [ -f "$MODDIR/scripts/diag_log.sh" ]; then
+    . "$MODDIR/scripts/diag_log.sh"
+fi
+
 log_msg() {
-    echo "$(date '+%F %T') $1" >> "$MAIN_LOG" 2>/dev/null
-    if [ -f "$MAIN_LOG" ] && [ "$(wc -c < "$MAIN_LOG" 2>/dev/null || echo 0)" -ge 102400 ]; then
-        : > "$MAIN_LOG" 2>/dev/null
+    if command -v agh_log_always >/dev/null 2>&1; then
+        agh_log_always "$1"
+    else
+        echo "$(date '+%F %T') $1" >> "$MAIN_LOG" 2>/dev/null || true
+    fi
+}
+
+file_hash() {
+    hf="$1"
+    [ -f "$hf" ] || return 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        set -- $(sha256sum "$hf" 2>/dev/null)
+        [ -n "${1:-}" ] && { printf '%s\n' "$1"; return 0; }
+    elif command -v shasum >/dev/null 2>&1; then
+        set -- $(shasum -a 256 "$hf" 2>/dev/null)
+        [ -n "${1:-}" ] && { printf '%s\n' "$1"; return 0; }
+    elif command -v md5sum >/dev/null 2>&1; then
+        set -- $(md5sum "$hf" 2>/dev/null)
+        [ -n "${1:-}" ] && { printf '%s\n' "$1"; return 0; }
+    else
+        set -- $(cksum "$hf" 2>/dev/null)
+        [ -n "${1:-}" ] && [ -n "${2:-}" ] && { printf '%s_%s\n' "$1" "$2"; return 0; }
+    fi
+    return 1
+}
+
+# 显式初始化单调时钟基准（必须在父 Shell 直接调用，严禁放入 $(...) 子命令替换中）
+init_monotonic_clock() {
+    if [ -n "${AGH_MONO_CLOCK_SOURCE:-}" ]; then
+        case "$AGH_MONO_CLOCK_SOURCE" in
+            uptime|perl_epoch|date_epoch)
+                case "${AGH_MONO_BASE_SEC:-}" in
+                    ''|*[!0-9]*) ;;
+                    *)
+                        export AGH_MONO_CLOCK_SOURCE AGH_MONO_BASE_SEC
+                        return 0
+                        ;;
+                esac
+                ;;
+            unavailable)
+                export AGH_MONO_CLOCK_SOURCE
+                return 1
+                ;;
+        esac
+    fi
+
+    _mc_up_f="${AGH_UPTIME_FILE:-/proc/uptime}"
+    if [ -r "$_mc_up_f" ]; then
+        _mc_sec=""
+        _mc_frac=""
+        IFS='. ' read -r _mc_sec _mc_frac _mc_rest < "$_mc_up_f" 2>/dev/null || true
+        case "${_mc_sec:-}" in
+            ''|*[!0-9]*) ;;
+            *)
+                while :; do
+                    case "$_mc_sec" in
+                        0[0-9]*) _mc_sec="${_mc_sec#0}" ;;
+                        *) break ;;
+                    esac
+                done
+                AGH_MONO_CLOCK_SOURCE="uptime"
+                AGH_MONO_BASE_SEC="$_mc_sec"
+                export AGH_MONO_CLOCK_SOURCE AGH_MONO_BASE_SEC
+                return 0
+                ;;
+        esac
+    fi
+
+    if [ "${AGH_DISABLE_FALLBACK_CLOCK:-0}" != "1" ]; then
+        _mc_sec=$(date +%s 2>/dev/null || true)
+        case "${_mc_sec:-}" in
+            ''|*[!0-9]*) ;;
+            *)
+                while :; do
+                    case "$_mc_sec" in
+                        0[0-9]*) _mc_sec="${_mc_sec#0}" ;;
+                        *) break ;;
+                    esac
+                done
+                if command -v perl >/dev/null 2>&1 && perl -MTime::HiRes=time -e 'exit 0' >/dev/null 2>&1; then
+                    AGH_MONO_CLOCK_SOURCE="perl_epoch"
+                else
+                    AGH_MONO_CLOCK_SOURCE="date_epoch"
+                fi
+                AGH_MONO_BASE_SEC="$_mc_sec"
+                export AGH_MONO_CLOCK_SOURCE AGH_MONO_BASE_SEC
+                return 0
+                ;;
+        esac
+    fi
+
+    AGH_MONO_CLOCK_SOURCE="unavailable"
+    AGH_MONO_BASE_SEC=""
+    export AGH_MONO_CLOCK_SOURCE AGH_MONO_BASE_SEC
+    return 1
+}
+
+# 仅读取已初始化的时间基准并输出相对毫秒（不修改 AGH_MONO_BASE_SEC / AGH_MONO_CLOCK_SOURCE）
+mono_now_ms() {
+    case "${AGH_MONO_CLOCK_SOURCE:-unavailable}" in
+        uptime)
+            case "${AGH_MONO_BASE_SEC:-}" in
+                ''|*[!0-9]*) printf 'unavailable\n'; return 1 ;;
+            esac
+            _mn_up_f="${AGH_UPTIME_FILE:-/proc/uptime}"
+            [ -r "$_mn_up_f" ] || { printf 'unavailable\n'; return 1; }
+            _mn_sec=""
+            _mn_frac=""
+            IFS='. ' read -r _mn_sec _mn_frac _mn_rest < "$_mn_up_f" 2>/dev/null || true
+            case "${_mn_sec:-}" in
+                ''|*[!0-9]*) printf 'unavailable\n'; return 1 ;;
+            esac
+            while :; do
+                case "$_mn_sec" in
+                    0[0-9]*) _mn_sec="${_mn_sec#0}" ;;
+                    *) break ;;
+                esac
+            done
+            _mn_frac="${_mn_frac:-0}"
+            case "$_mn_frac" in
+                ''|*[!0-9]*) _mn_frac=0 ;;
+            esac
+            case "$_mn_frac" in
+                ?) _mn_cs="${_mn_frac}0" ;;
+                *) _mn_cs=$(printf '%.2s' "$_mn_frac") ;;
+            esac
+            case "$_mn_cs" in
+                0[0-9]) _mn_cs="${_mn_cs#0}" ;;
+            esac
+            [ -n "$_mn_cs" ] || _mn_cs=0
+            printf '%s\n' $(((_mn_sec - AGH_MONO_BASE_SEC) * 1000 + _mn_cs * 10))
+            return 0
+            ;;
+        perl_epoch)
+            case "${AGH_MONO_BASE_SEC:-}" in
+                ''|*[!0-9]*) printf 'unavailable\n'; return 1 ;;
+            esac
+            perl -MTime::HiRes=time -e 'my $t=time(); my $b=$ENV{AGH_MONO_BASE_SEC}; printf "%.0f\n", ($t-$b)*1000;' 2>/dev/null && return 0
+            printf 'unavailable\n'
+            return 1
+            ;;
+        date_epoch)
+            case "${AGH_MONO_BASE_SEC:-}" in
+                ''|*[!0-9]*) printf 'unavailable\n'; return 1 ;;
+            esac
+            _mn_sec=$(date +%s 2>/dev/null || true)
+            case "${_mn_sec:-}" in
+                ''|*[!0-9]*) printf 'unavailable\n'; return 1 ;;
+            esac
+            while :; do
+                case "$_mn_sec" in
+                    0[0-9]*) _mn_sec="${_mn_sec#0}" ;;
+                    *) break ;;
+                esac
+            done
+            printf '%s\n' $(((_mn_sec - AGH_MONO_BASE_SEC) * 1000))
+            return 0
+            ;;
+        *)
+            printf 'unavailable\n'
+            return 1
+            ;;
+    esac
+}
+
+is_signed_int() {
+    case "${1:-}" in
+        ''|'-') return 1 ;;
+        -[0-9]*)
+            _isi_rest="${1#-}"
+            case "$_isi_rest" in ''|*[!0-9]*) return 1 ;; esac
+            return 0
+            ;;
+        *[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+log_stage_timing() {
+    [ -n "${AGH_SWITCH_OP_ID:-}" ] || return 0
+    _lt_name="$1"
+    _lt_status="$2"
+    _lt_start="${3:-unavailable}"
+    _lt_end="${4:-unavailable}"
+    _lt_detail="${5:-}"
+    _lt_src="${AGH_MONO_CLOCK_SOURCE:-unavailable}"
+
+    if ! is_signed_int "$_lt_start" || ! is_signed_int "$_lt_end"; then
+        if [ -n "$_lt_detail" ]; then
+            log_msg "[TIMING] op_id=${AGH_SWITCH_OP_ID} stage=${_lt_name} status=${_lt_status} elapsed_ms=unavailable clock_error=read_failed source=${_lt_src} ${_lt_detail}"
+        else
+            log_msg "[TIMING] op_id=${AGH_SWITCH_OP_ID} stage=${_lt_name} status=${_lt_status} elapsed_ms=unavailable clock_error=read_failed source=${_lt_src}"
+        fi
+        return 0
+    fi
+
+    _lt_elapsed=$((_lt_end - _lt_start))
+    if [ "$_lt_elapsed" -lt 0 ]; then
+        if [ -n "$_lt_detail" ]; then
+            log_msg "[TIMING] op_id=${AGH_SWITCH_OP_ID} stage=${_lt_name} status=${_lt_status} elapsed_ms=invalid clock_error=negative_delta start_ms=${_lt_start} end_ms=${_lt_end} delta_ms=${_lt_elapsed} source=${_lt_src} ${_lt_detail}"
+        else
+            log_msg "[TIMING] op_id=${AGH_SWITCH_OP_ID} stage=${_lt_name} status=${_lt_status} elapsed_ms=invalid clock_error=negative_delta start_ms=${_lt_start} end_ms=${_lt_end} delta_ms=${_lt_elapsed} source=${_lt_src}"
+        fi
+        return 0
+    fi
+
+    if [ "$_lt_status" = "ok" ] || [ "$_lt_status" = "skipped" ]; then
+        if command -v agh_diag_debug_active >/dev/null 2>&1; then
+            agh_diag_debug_active || return 0
+        fi
+    fi
+    if [ -n "$_lt_detail" ]; then
+        log_msg "[TIMING] op_id=${AGH_SWITCH_OP_ID} stage=${_lt_name} status=${_lt_status} elapsed_ms=${_lt_elapsed} ${_lt_detail}"
+    else
+        log_msg "[TIMING] op_id=${AGH_SWITCH_OP_ID} stage=${_lt_name} status=${_lt_status} elapsed_ms=${_lt_elapsed}"
     fi
 }
 
 # ==============================================================================
-# 内核 flock 能力探测与自检（严禁退化为有竞态的 mkdir + rm -rf 目录锁）
+# 内核 flock 能力统一探测与三步独立进程竞争自检（严禁退化为有竞态的目录锁）
+# 关键兼容性修复：Android /system/bin/sh (mksh) 会对 FD > 2 自动设置 FD_CLOEXEC，
+# 因此先在当前 shell 打开长寿命描述符 (exec FD<>lockfile)，调用外部 flock 时统一通过
+# 0<&FD 重定向到 FD 0 (stdin) 执行，使 dup2(FD, 0) 在子进程中合法保留内核锁绑定。
+# 统一工具选择顺序：custom($FLOCK_BIN) -> busybox -> system(PATH flock) -> toybox
 # ==============================================================================
-FLOCK_CMD_TYPE=""
-resolve_flock_cmd() {
-    [ -n "$FLOCK_CMD_TYPE" ] && return 0
-    if [ -n "${FLOCK_BIN:-}" ] && [ -x "$FLOCK_BIN" ]; then
-        FLOCK_CMD_TYPE="custom"
-        return 0
+FLOCK_VERIFIED=0
+FLOCK_RESOLVED_KIND=""
+FLOCK_RESOLVED_BIN=""
+FLOCK_RESOLVED_TARGET=""
+FLOCK_RESOLVED_SUBCMD=""
+FLOCK_RESOLVED_IMPL=""
+FLOCK_RESOLVED_ARGS="-n 0 / -u 0 (0<&FD)"
+FLOCK_RESOLVED_CMD_STR=""
+FLOCK_VERIFY_STEPS=""
+FLOCK_LAST_DIAG=""
+
+resolve_symlink_target() {
+    bin_p="$1"
+    if command -v readlink >/dev/null 2>&1; then
+        t=$(readlink -f "$bin_p" 2>/dev/null || readlink "$bin_p" 2>/dev/null || true)
+        [ -n "$t" ] && { printf '%s\n' "$t"; return 0; }
     fi
-    if command -v flock >/dev/null 2>&1; then
-        FLOCK_CMD_TYPE="direct"
-        return 0
+    printf '%s\n' "$bin_p"
+}
+
+detect_flock_impl_source() {
+    c_kind="$1"
+    c_bin="$2"
+    c_target="$3"
+    case "$c_kind" in
+        busybox) echo "busybox"; return 0 ;;
+        toybox)  echo "toybox"; return 0 ;;
+    esac
+    case "${c_bin} ${c_target}" in
+        *busybox*) echo "busybox"; return 0 ;;
+        *toybox*)  echo "toybox"; return 0 ;;
+    esac
+    h_txt=$("$c_bin" --help 2>&1 | head -n 5 || true)
+    case "$h_txt" in
+        *BusyBox*|*busybox*) echo "busybox"; return 0 ;;
+        *Toybox*|*toybox*)   echo "toybox"; return 0 ;;
+        *util-linux*)        echo "util-linux"; return 0 ;;
+    esac
+    if [ "$c_kind" = "custom" ]; then
+        echo "custom"
+    else
+        echo "system"
     fi
-    if [ -n "$BB_BIN" ] && "$BB_BIN" flock --help >/dev/null 2>&1; then
-        FLOCK_CMD_TYPE="busybox"
-        return 0
+}
+
+exec_flock_on_fd() {
+    c_bin="$1"
+    c_sub="$2"
+    f_flag="$3"
+    f_fd="$4"
+    if [ -n "$c_sub" ]; then
+        case "$f_fd" in
+            6) "$c_bin" "$c_sub" "$f_flag" 0 0<&6 >/dev/null 2>&1 ;;
+            7) "$c_bin" "$c_sub" "$f_flag" 0 0<&7 >/dev/null 2>&1 ;;
+            8) "$c_bin" "$c_sub" "$f_flag" 0 0<&8 >/dev/null 2>&1 ;;
+            9) "$c_bin" "$c_sub" "$f_flag" 0 0<&9 >/dev/null 2>&1 ;;
+            *) return 1 ;;
+        esac
+    else
+        case "$f_fd" in
+            6) "$c_bin" "$f_flag" 0 0<&6 >/dev/null 2>&1 ;;
+            7) "$c_bin" "$f_flag" 0 0<&7 >/dev/null 2>&1 ;;
+            8) "$c_bin" "$f_flag" 0 0<&8 >/dev/null 2>&1 ;;
+            9) "$c_bin" "$f_flag" 0 0<&9 >/dev/null 2>&1 ;;
+            *) return 1 ;;
+        esac
     fi
-    if [ -x /system/bin/toybox ] && /system/bin/toybox flock --help >/dev/null 2>&1; then
-        FLOCK_CMD_TYPE="toybox"
+}
+
+run_flock_nb() {
+    verify_flock_support >/dev/null 2>&1 || return 1
+    exec_flock_on_fd "$FLOCK_RESOLVED_BIN" "$FLOCK_RESOLVED_SUBCMD" -n "$1"
+}
+
+run_flock_unlock() {
+    [ "$FLOCK_VERIFIED" = "1" ] || return 0
+    exec_flock_on_fd "$FLOCK_RESOLVED_BIN" "$FLOCK_RESOLVED_SUBCMD" -u "$1"
+}
+
+is_file_kernel_locked() {
+    chk_file="$1"
+    [ -e "$chk_file" ] || return 1
+    verify_flock_support >/dev/null 2>&1 || return 2
+    (
+        exec 6<>"$chk_file" 2>/dev/null || exit 2
+        if run_flock_nb 6; then
+            run_flock_unlock 6 || true
+            exec 6>&- 2>/dev/null || true
+            exit 1
+        fi
+        exec 6>&- 2>/dev/null || true
+        exit 0
+    ) 7>&- 8>&- 9>&-
+}
+
+test_flock_candidate_3step() {
+    c_kind="$1"
+    c_bin="$2"
+    c_sub="$3"
+    c_target=$(resolve_symlink_target "$c_bin")
+    c_impl=$(detect_flock_impl_source "$c_kind" "$c_bin" "$c_target")
+    if [ -n "$c_sub" ]; then
+        c_cmd="${c_bin} ${c_sub} -n 0 0<&FD"
+    else
+        c_cmd="${c_bin} -n 0 0<&FD"
+    fi
+
+    probe_f="$RUN_DIR/.agh_flock_verify.$$.${c_kind}"
+    probe_ready="${probe_f}.ready"
+    probe_release="${probe_f}.release"
+    rm -f "$probe_f" "$probe_ready" "$probe_release" 2>/dev/null
+
+    # 步骤 1：第 1 个独立进程打开并持有排他锁一段短时间
+    "$SH_BIN" -c '
+        pf="$1"; ready="$2"; rel="$3"; cbin="$4"; csub="$5"; bb="$6"
+        exec 7<>"$pf" 2>/dev/null || exit 11
+        if [ -n "$csub" ]; then
+            "$cbin" "$csub" -n 0 0<&7 >/dev/null 2>&1 || exit 12
+        else
+            "$cbin" -n 0 0<&7 >/dev/null 2>&1 || exit 12
+        fi
+        printf "%s\n" "$$" > "$ready" 2>/dev/null || exit 13
+        w=0
+        while [ ! -f "$rel" ] && [ "$w" -lt 60 ]; do
+            sleep 0.05 2>/dev/null || { [ -n "$bb" ] && "$bb" sleep 0.05 2>/dev/null; } || /system/bin/toybox sleep 0.05 2>/dev/null || sleep 1
+            w=$((w + 1))
+        done
+        if [ -n "$csub" ]; then
+            "$cbin" "$csub" -u 0 0<&7 >/dev/null 2>&1 || true
+        else
+            "$cbin" -u 0 0<&7 >/dev/null 2>&1 || true
+        fi
+        exec 7>&- 2>/dev/null || true
+        exit 0
+    ' _ "$probe_f" "$probe_ready" "$probe_release" "$c_bin" "$c_sub" "${BB_BIN:-}" 7>&- 8>&- 9>&- &
+    p1_pid=$!
+
+    w_rdy=0
+    while [ ! -f "$probe_ready" ] && kill -0 "$p1_pid" 2>/dev/null && [ "$w_rdy" -lt 40 ]; do
+        safe_sleep 0.05 || sleep 1
+        w_rdy=$((w_rdy + 1))
+    done
+
+    step1_rc="1"
+    step2_rc="skip"
+    step3_rc="skip"
+
+    if [ ! -f "$probe_ready" ]; then
+        : > "$probe_release" 2>/dev/null
+        wait "$p1_pid" 2>/dev/null
+        step1_rc=$?
+        [ "$step1_rc" -eq 0 ] && step1_rc=1
+        rm -f "$probe_f" "$probe_ready" "$probe_release" 2>/dev/null
+        LAST_CAND_REPORT="${c_kind}[${c_impl}]:${c_cmd}|step1=${step1_rc},step2=${step2_rc},step3=${step3_rc}"
+        return 1
+    fi
+
+    # 步骤 2：第 2 个独立进程重新打开同一锁文件尝试非阻塞加锁，必须失败 (step2_rc=1)
+    "$SH_BIN" -c '
+        pf="$1"; cbin="$2"; csub="$3"
+        exec 7<>"$pf" 2>/dev/null || exit 21
+        if [ -n "$csub" ]; then
+            if "$cbin" "$csub" -n 0 0<&7 >/dev/null 2>&1; then
+                "$cbin" "$csub" -u 0 0<&7 >/dev/null 2>&1 || true
+                exec 7>&- 2>/dev/null || true
+                exit 0
+            fi
+        else
+            if "$cbin" -n 0 0<&7 >/dev/null 2>&1; then
+                "$cbin" -u 0 0<&7 >/dev/null 2>&1 || true
+                exec 7>&- 2>/dev/null || true
+                exit 0
+            fi
+        fi
+        exec 7>&- 2>/dev/null || true
+        exit 1
+    ' _ "$probe_f" "$c_bin" "$c_sub" 7>&- 8>&- 9>&-
+    step2_rc=$?
+
+    # 通知第 1 个进程释放锁并等待其彻底退出
+    : > "$probe_release" 2>/dev/null
+    wait "$p1_pid" 2>/dev/null
+    step1_rc=$?
+
+    # 步骤 3：释放后第 3 个独立进程重新打开同一锁文件非阻塞获取，必须成功 (step3_rc=0)
+    "$SH_BIN" -c '
+        pf="$1"; cbin="$2"; csub="$3"
+        exec 7<>"$pf" 2>/dev/null || exit 31
+        if [ -n "$csub" ]; then
+            "$cbin" "$csub" -n 0 0<&7 >/dev/null 2>&1 || { exec 7>&- 2>/dev/null || true; exit 1; }
+            "$cbin" "$csub" -u 0 0<&7 >/dev/null 2>&1 || true
+        else
+            "$cbin" -n 0 0<&7 >/dev/null 2>&1 || { exec 7>&- 2>/dev/null || true; exit 1; }
+            "$cbin" -u 0 0<&7 >/dev/null 2>&1 || true
+        fi
+        exec 7>&- 2>/dev/null || true
+        exit 0
+    ' _ "$probe_f" "$c_bin" "$c_sub" 7>&- 8>&- 9>&-
+    step3_rc=$?
+
+    rm -f "$probe_f" "$probe_ready" "$probe_release" 2>/dev/null
+    LAST_CAND_REPORT="${c_kind}[${c_impl}]:${c_cmd}|step1=${step1_rc},step2=${step2_rc},step3=${step3_rc}"
+
+    if [ "$step1_rc" -eq 0 ] && [ "$step2_rc" -eq 1 ] && [ "$step3_rc" -eq 0 ]; then
+        FLOCK_VERIFIED=1
+        FLOCK_RESOLVED_KIND="$c_kind"
+        FLOCK_RESOLVED_BIN="$c_bin"
+        FLOCK_RESOLVED_TARGET="$c_target"
+        FLOCK_RESOLVED_SUBCMD="$c_sub"
+        FLOCK_RESOLVED_IMPL="$c_impl"
+        FLOCK_RESOLVED_CMD_STR="$c_cmd"
+        FLOCK_VERIFY_STEPS="step1=${step1_rc},step2=${step2_rc},step3=${step3_rc}"
         return 0
     fi
     return 1
 }
 
-run_flock() {
-    resolve_flock_cmd || return 1
-    case "$FLOCK_CMD_TYPE" in
-        custom)  "$FLOCK_BIN" "$@" ;;
-        direct)  flock "$@" ;;
-        busybox) "$BB_BIN" flock "$@" ;;
-        toybox)  /system/bin/toybox flock "$@" ;;
-        *)       return 1 ;;
-    esac
-}
-
-FLOCK_VERIFIED=0
 verify_flock_support() {
     [ "$FLOCK_VERIFIED" = "1" ] && return 0
-    resolve_flock_cmd || {
-        log_msg "[FATAL] 未找到可用 flock 工具，拒绝无锁执行修改操作"
-        return 1
-    }
-    probe_f="$RUN_DIR/.agh_flock_verify.$$"
-    if ! (
-        exec 7>>"$probe_f" 2>/dev/null || exit 1
-        run_flock -n 7 || exit 1
-        # 验证另一独立打开的描述符无法再次获取排他锁
-        if ( exec 7>>"$probe_f" 2>/dev/null && run_flock -n 7 ); then
-            exit 1
+    FLOCK_LAST_DIAG=""
+
+    # 1. custom ($FLOCK_BIN)
+    if [ -n "${FLOCK_BIN:-}" ] && [ -x "$FLOCK_BIN" ]; then
+        if test_flock_candidate_3step "custom" "$FLOCK_BIN" ""; then
+            return 0
         fi
-        exit 0
-    ); then
-        rm -f "$probe_f" 2>/dev/null
-        log_msg "[FATAL] 当前环境 flock 排他语义自检未通过，拒绝无锁继续"
-        return 1
+        FLOCK_LAST_DIAG="${FLOCK_LAST_DIAG:+${FLOCK_LAST_DIAG}; }${LAST_CAND_REPORT}"
     fi
-    rm -f "$probe_f" 2>/dev/null
-    FLOCK_VERIFIED=1
-    return 0
+
+    # 2. busybox ($BB_BIN flock)
+    if [ -n "${BB_BIN:-}" ] && [ -x "$BB_BIN" ]; then
+        if test_flock_candidate_3step "busybox" "$BB_BIN" "flock"; then
+            return 0
+        fi
+        FLOCK_LAST_DIAG="${FLOCK_LAST_DIAG:+${FLOCK_LAST_DIAG}; }${LAST_CAND_REPORT}"
+    fi
+
+    # 3. system (PATH 中的 standalone flock)
+    sys_flock=$(command -v flock 2>/dev/null || true)
+    if [ -n "$sys_flock" ] && [ -x "$sys_flock" ]; then
+        if test_flock_candidate_3step "system" "$sys_flock" ""; then
+            return 0
+        fi
+        FLOCK_LAST_DIAG="${FLOCK_LAST_DIAG:+${FLOCK_LAST_DIAG}; }${LAST_CAND_REPORT}"
+    fi
+
+    # 4. toybox (/system/bin/toybox flock 或 PATH toybox)
+    toybox_bin="/system/bin/toybox"
+    [ -x "$toybox_bin" ] || toybox_bin=$(command -v toybox 2>/dev/null || true)
+    if [ -n "$toybox_bin" ] && [ -x "$toybox_bin" ]; then
+        if test_flock_candidate_3step "toybox" "$toybox_bin" "flock"; then
+            return 0
+        fi
+        FLOCK_LAST_DIAG="${FLOCK_LAST_DIAG:+${FLOCK_LAST_DIAG}; }${LAST_CAND_REPORT}"
+    fi
+
+    [ -n "$FLOCK_LAST_DIAG" ] || FLOCK_LAST_DIAG="no_flock_binary_found"
+    log_msg "[FATAL] ${SCRIPT_LABEL}: 当前环境 flock 排他语义自检未通过，拒绝无锁继续 (${FLOCK_LAST_DIAG})"
+    return 1
 }
 
 # ==============================================================================
@@ -173,14 +607,15 @@ verify_flock_support() {
 # ==============================================================================
 WATCHDOG_LOCK_OWNED=0
 OP_LOCK_OWNED=0
+OP_LOCK_INHERITED=0
 ABORTED_BY_SIGNAL=0
 CLEANUP_DONE=0
 ACTIVE_CHILD_PID=""
 
-# 运行可能修改共享状态的同步子命令：支持信号中断时先终止并 wait 回收子进程，再释放操作锁
+# 运行可能修改共享状态的同步子命令：显式关闭 7/8/9 锁描述符，通过父锁校验上下文协同运行
 run_sync_child() {
     [ "$ABORTED_BY_SIGNAL" = "1" ] && return 143
-    "$@" 8>&- &
+    "$@" 7>&- 8>&- 9>&- &
     ACTIVE_CHILD_PID=$!
     wait "$ACTIVE_CHILD_PID" 2>/dev/null
     child_rc=$?
@@ -216,21 +651,15 @@ terminate_active_child() {
 # ==============================================================================
 watchdog_alive() {
     [ "$WATCHDOG_LOCK_OWNED" = "1" ] && return 0
-    verify_flock_support || return 1
-    (
-        exec 8>>"$WATCHDOG_LOCK_FILE" 2>/dev/null || exit 1
-        if run_flock -n 8; then
-            exit 1
-        fi
-        exit 0
-    )
+    verify_flock_support >/dev/null 2>&1 || return 1
+    is_file_kernel_locked "$WATCHDOG_LOCK_FILE"
 }
 
 acquire_watchdog_lock() {
     [ "$WATCHDOG_LOCK_OWNED" = "1" ] && return 0
     verify_flock_support || return 1
-    exec 8>>"$WATCHDOG_LOCK_FILE" 2>/dev/null || return 1
-    if ! run_flock -n 8; then
+    exec 8<>"$WATCHDOG_LOCK_FILE" 2>/dev/null || return 1
+    if ! run_flock_nb 8; then
         exec 8>&- 2>/dev/null || true
         return 1
     fi
@@ -241,10 +670,10 @@ acquire_watchdog_lock() {
 
 release_watchdog_lock() {
     if [ "$WATCHDOG_LOCK_OWNED" = "1" ]; then
-        if [ "$(cat "$WATCHDOG_PID_FILE" 2>/dev/null)" = "$$" ]; then
+        if [ "$(cat "$WATCHDOG_PID_FILE" 2>/dev/null | tr -d '\r[:space:]')" = "$$" ]; then
             rm -f "$WATCHDOG_PID_FILE" 2>/dev/null
         fi
-        run_flock -u 8 2>/dev/null || true
+        run_flock_unlock 8 || true
         exec 8>&- 2>/dev/null || true
         WATCHDOG_LOCK_OWNED=0
     fi
@@ -252,14 +681,131 @@ release_watchdog_lock() {
 
 # ==============================================================================
 # 锁机制 2：短期生命周期操作内核锁 (FD 9 -> OP_LOCK_FILE)
-# 支持已持锁父进程同步调用继承 (AGH_OP_LOCK_HELD=1) 与 exec 权属移交 (AGH_OP_LOCK_EXEC_TRANSFER=1)
+# 仅在成功获取内核锁后写入诊断 PID；子进程验证父进程确实持锁且退出时不解锁父锁
 # ==============================================================================
-has_op_lock_context() {
-    [ "$OP_LOCK_OWNED" = "1" ] && return 0
-    if [ "${AGH_OP_LOCK_HELD:-0}" = "1" ] && { true >&9; } 2>/dev/null; then
+is_trusted_flock_bin() {
+    cand_p="${1:-}"
+    [ -n "$cand_p" ] && [ -x "$cand_p" ] || return 1
+    [ "$cand_p" = "${FLOCK_BIN:-}" ] && return 0
+    [ "$cand_p" = "${BB_BIN:-}" ] && return 0
+    sys_f=$(command -v flock 2>/dev/null || true)
+    [ -n "$sys_f" ] && [ "$cand_p" = "$sys_f" ] && return 0
+    [ "$cand_p" = "/system/bin/toybox" ] && return 0
+    path_tb=$(command -v toybox 2>/dev/null || true)
+    [ -n "$path_tb" ] && [ "$cand_p" = "$path_tb" ] && return 0
+    return 1
+}
+
+PARENT_LOCK_VERIFIED=0
+verify_parent_op_lock_held() {
+    [ "${AGH_OP_LOCK_HELD:-0}" = "1" ] || return 1
+    parent_holder="${AGH_OP_LOCK_HOLDER_PID:-}"
+    case "$parent_holder" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    if ! kill -0 "$parent_holder" 2>/dev/null && [ ! -d "$PROC_DIR/$parent_holder" ]; then
+        return 1
+    fi
+    diag_pid=$(cat "$OP_LOCK_DIAG_PID_FILE" 2>/dev/null | tr -d '\r[:space:]')
+    [ "$diag_pid" = "$parent_holder" ] || return 1
+    if [ "$PARENT_LOCK_VERIFIED" = "1" ]; then
         return 0
     fi
+    if [ "$FLOCK_VERIFIED" != "1" ] && is_trusted_flock_bin "${AGH_TX_FLOCK_BIN:-}"; then
+        FLOCK_RESOLVED_BIN="$AGH_TX_FLOCK_BIN"
+        FLOCK_RESOLVED_SUBCMD="${AGH_TX_FLOCK_SUBCMD:-}"
+        FLOCK_RESOLVED_KIND="${AGH_TX_FLOCK_KIND:-system}"
+        FLOCK_RESOLVED_IMPL="${AGH_TX_FLOCK_IMPL:-system}"
+        FLOCK_RESOLVED_TARGET="${AGH_TX_FLOCK_TARGET:-$AGH_TX_FLOCK_BIN}"
+        FLOCK_RESOLVED_CMD_STR="${AGH_TX_FLOCK_CMD_STR:-}"
+        FLOCK_VERIFY_STEPS="${AGH_TX_FLOCK_VERIFY_STEPS:-inherited}"
+        FLOCK_VERIFIED=1
+        if ! is_file_kernel_locked "$OP_LOCK_FILE"; then
+            FLOCK_VERIFIED=0
+            verify_flock_support >/dev/null 2>&1 || return 1
+            is_file_kernel_locked "$OP_LOCK_FILE" || return 1
+        fi
+    else
+        verify_flock_support >/dev/null 2>&1 || return 1
+        is_file_kernel_locked "$OP_LOCK_FILE" || return 1
+    fi
+    PARENT_LOCK_VERIFIED=1
+    return 0
+}
+
+has_op_lock_context() {
+    [ "$OP_LOCK_OWNED" = "1" ] && return 0
+    verify_parent_op_lock_held && return 0
     return 1
+}
+
+diagnose_op_lock_timeout() {
+    wait_secs="${1:-15}"
+    kernel_locked="no"
+    if [ -e "$OP_LOCK_FILE" ] && is_file_kernel_locked "$OP_LOCK_FILE"; then
+        kernel_locked="yes"
+    fi
+
+    holder_pid="unknown"
+    diag_reason=""
+    if [ ! -e "$OP_LOCK_DIAG_PID_FILE" ]; then
+        if [ "$kernel_locked" = "yes" ]; then
+            diag_reason="检测到锁被占用，且没有诊断记录 (no_diag_record)"
+        else
+            diag_reason="没有诊断记录，且当前锁已释放 (no_diag_record, lock_free)"
+        fi
+    elif [ ! -r "$OP_LOCK_DIAG_PID_FILE" ]; then
+        if [ "$kernel_locked" = "yes" ]; then
+            diag_reason="检测到锁被占用，但诊断记录不可读 (diag_unreadable)"
+        else
+            diag_reason="诊断记录不可读，且当前锁未占用 (diag_unreadable)"
+        fi
+    else
+        raw_pid=$(cat "$OP_LOCK_DIAG_PID_FILE" 2>/dev/null)
+        cat_rc=$?
+        raw_pid=$(printf '%s' "$raw_pid" | tr -d '\r[:space:]')
+        if [ "$cat_rc" -ne 0 ]; then
+            if [ "$kernel_locked" = "yes" ]; then
+                diag_reason="检测到锁被占用，但读取诊断记录失败 (diag_unreadable)"
+            else
+                diag_reason="诊断记录不可读 (diag_unreadable)"
+            fi
+        elif [ -z "$raw_pid" ]; then
+            if [ "$kernel_locked" = "yes" ]; then
+                diag_reason="检测到锁被占用，但诊断记录为空 (no_diag_record)"
+            else
+                diag_reason="没有诊断记录(文件为空) (no_diag_record)"
+            fi
+        else
+            case "$raw_pid" in
+                *[!0-9]*)
+                    if [ "$kernel_locked" = "yes" ]; then
+                        diag_reason="检测到锁被占用，诊断记录格式异常 (diag_invalid)"
+                    else
+                        diag_reason="诊断记录格式异常 (diag_invalid)"
+                    fi
+                    ;;
+                *)
+                    holder_pid="$raw_pid"
+                    if kill -0 "$holder_pid" 2>/dev/null || [ -d "$PROC_DIR/$holder_pid" ]; then
+                        if [ "$kernel_locked" = "yes" ]; then
+                            diag_reason="检测到锁被占用，持有进程存活 (lock_held_by_active_pid)"
+                        else
+                            diag_reason="诊断进程存活但内核锁当前空闲 (pid_alive_lock_free)"
+                        fi
+                    else
+                        if [ "$kernel_locked" = "yes" ]; then
+                            diag_reason="检测到锁被占用，但记录的PID不在进程表中 (lock_held_pid_missing)"
+                        else
+                            diag_reason="诊断PID已退出且锁已空闲 (stale_pid_lock_free)"
+                        fi
+                    fi
+                    ;;
+            esac
+        fi
+    fi
+
+    log_msg "[WARN] ${SCRIPT_LABEL}: timed out waiting for operation lock (lock_file=${OP_LOCK_FILE}, flock_cmd=\"${FLOCK_RESOLVED_CMD_STR}\", waited=${wait_secs}s, holder_pid=${holder_pid}, kernel_locked=${kernel_locked}, reason=${diag_reason})"
 }
 
 acquire_op_lock() {
@@ -268,22 +814,22 @@ acquire_op_lock() {
     if [ "$OP_LOCK_OWNED" = "1" ]; then
         return 0
     fi
-    # exec 转交模式：接收父进程在 FD 9 上已持有的内核锁所有权
-    if [ "${AGH_OP_LOCK_EXEC_TRANSFER:-0}" = "1" ] && { true >&9; } 2>/dev/null; then
-        OP_LOCK_OWNED=1
-        unset AGH_OP_LOCK_EXEC_TRANSFER
-        export AGH_OP_LOCK_HELD=1
-        printf '%s\n' "$$" > "$OP_LOCK_DIAG_PID_FILE" 2>/dev/null
-        return 0
-    fi
-    # 同步子进程共享锁模式：父进程已持有 FD 9，子进程在父进程锁保护下运行且退出时不释放父进程锁
-    if [ "${AGH_OP_LOCK_HELD:-0}" = "1" ] && { true >&9; } 2>/dev/null; then
-        OP_LOCK_OWNED=0
-        return 0
+    # 同步子进程受父进程锁保护模式：确认父进程确实持有内核锁，子进程运行且退出时不解锁父锁
+    if [ "${AGH_OP_LOCK_HELD:-0}" = "1" ]; then
+        if verify_parent_op_lock_held; then
+            OP_LOCK_OWNED=0
+            OP_LOCK_INHERITED=1
+            return 0
+        fi
+        log_msg "[ERROR] ${SCRIPT_LABEL}: 检测到父进程锁继承标记 (AGH_OP_LOCK_HELD=1)，但未能验证父进程 (${AGH_OP_LOCK_HOLDER_PID:-unknown}) 实际持有操作锁，拒绝继承。"
+        return 1
     fi
 
     verify_flock_support || return 1
-    exec 9>>"$OP_LOCK_FILE" 2>/dev/null || return 1
+    exec 9<>"$OP_LOCK_FILE" 2>/dev/null || {
+        log_msg "[ERROR] ${SCRIPT_LABEL}: 无法打开操作锁文件 ${OP_LOCK_FILE}"
+        return 1
+    }
 
     waited=0
     step_max=$((max_wait * 5))
@@ -293,9 +839,11 @@ acquire_op_lock() {
             exec 9>&- 2>/dev/null || true
             return 1
         fi
-        if run_flock -n 9; then
+        if run_flock_nb 9; then
             OP_LOCK_OWNED=1
+            OP_LOCK_INHERITED=0
             export AGH_OP_LOCK_HELD=1
+            export AGH_OP_LOCK_HOLDER_PID="$$"
             printf '%s\n' "$$" > "$OP_LOCK_DIAG_PID_FILE" 2>/dev/null
             return 0
         fi
@@ -307,21 +855,25 @@ acquire_op_lock() {
         fi
     done
 
-    holder_diag=$(cat "$OP_LOCK_DIAG_PID_FILE" 2>/dev/null)
     exec 9>&- 2>/dev/null || true
-    log_msg "[WARN] 等待操作锁超时 (${max_wait}s, 当前诊断持有者 PID=${holder_diag:-unknown})"
+    diagnose_op_lock_timeout "$max_wait"
     return 1
 }
 
 release_op_lock() {
     if [ "$OP_LOCK_OWNED" = "1" ]; then
-        if [ "$(cat "$OP_LOCK_DIAG_PID_FILE" 2>/dev/null)" = "$$" ]; then
+        if [ "$(cat "$OP_LOCK_DIAG_PID_FILE" 2>/dev/null | tr -d '\r[:space:]')" = "$$" ]; then
             rm -f "$OP_LOCK_DIAG_PID_FILE" 2>/dev/null
         fi
-        run_flock -u 9 2>/dev/null || true
+        run_flock_unlock 9 || true
         exec 9>&- 2>/dev/null || true
         OP_LOCK_OWNED=0
-        unset AGH_OP_LOCK_HELD
+        OP_LOCK_INHERITED=0
+        unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID \
+              AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE \
+              AGH_TX_FLOCK_BIN AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_KIND AGH_TX_FLOCK_IMPL \
+              AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS \
+              AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED
     fi
 }
 
@@ -360,6 +912,13 @@ load_runtime_config() {
     ENABLE_SNI=${ENABLE_SNI:-1}
     VPN_DNS_TAKEOVER=${VPN_DNS_TAKEOVER:-auto}
     RUN_MODE=${RUN_MODE:-overseas}
+    case "${AGH_TX_TARGET_MODE:-}" in
+        cn|overseas)
+            if [ "${AGH_OP_LOCK_HELD:-0}" = "1" ] && has_op_lock_context; then
+                RUN_MODE="$AGH_TX_TARGET_MODE"
+            fi
+            ;;
+    esac
     case "$RUN_MODE" in
         cn|CN) active_mode="cn" ;;
         *)     active_mode="overseas" ;;
@@ -431,7 +990,10 @@ escape_app_cgroup() {
         [ -w "$cg" ] && echo "$target_pid" > "$cg" 2>/dev/null
     done
 }
-escape_app_cgroup "$$"
+case "${1:-}" in
+    --diag-flock|diag-flock|--diag-sni|diag-sni) ;;
+    *) escape_app_cgroup "$$" ;;
+esac
 
 # 主动清理所有手动停止锁标记（仅在已持有操作锁的显式启动 / 修复 / 切换流程中调用）
 clear_stop_locks() {
@@ -567,9 +1129,11 @@ agh_core_healthy() {
     agh_running && udp_port_listening "$check_port" && tcp_port_listening "$check_port"
 }
 
-# 检查是否仍残留模块挂载的 OUTPUT 劫持跳转规则
+# 检查是否仍残留模块挂载的 OUTPUT/INPUT 劫持跳转规则
 has_residual_firewall_jumps() {
     iptables -w 2 -t nat -C OUTPUT -j ADGUARD >/dev/null 2>&1 && return 0
+    iptables -w 2 -t filter -C OUTPUT -j ADGUARD_DOT >/dev/null 2>&1 && return 0
+    iptables -w 2 -t filter -C INPUT -j AGH_INPUT >/dev/null 2>&1 && return 0
     iptables -w 2 -t mangle -C OUTPUT -j AGH_SNI >/dev/null 2>&1 && return 0
     ip6tables -w 2 -t nat -C OUTPUT -j ADGUARD6_NAT >/dev/null 2>&1 && return 0
     ip6tables -w 2 -t filter -C OUTPUT -j ADGUARD6 >/dev/null 2>&1 && return 0
@@ -657,7 +1221,7 @@ build_ca_bundle() {
 }
 
 # 以 setsid + BusyBox/util-linux nsenter 切入 PID 1 根命名空间与专属 GID 23333
-# 关键：显式关闭 FD 8 与 FD 9 (8>&- 9>&-)，杜绝 AdGuardHome 核心进程意外继承守护锁或短期操作锁！
+# 关键：显式关闭 FD 7/8/9 并清理锁继承环境变量，杜绝 AdGuardHome 核心进程意外继承守护锁或操作锁！
 spawn_agh_in_root_ns() {
     escape_app_cgroup "$$"
     TRUE_BIN="/system/bin/true"
@@ -672,19 +1236,19 @@ spawn_agh_in_root_ns() {
 
     if [ -n "$BB_BIN" ]; then
         if "$BB_BIN" nsenter -t 1 -m -u -i -n -p -F -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
-            $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -u -i -n -p -F -G "$AGH_GID" "$@" </dev/null >/dev/null 2>&1 8>&- 9>&- &
+            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -u -i -n -p -F -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
             return 0
         elif "$BB_BIN" nsenter -t 1 -m -u -i -n -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
-            $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -u -i -n -G "$AGH_GID" "$@" </dev/null >/dev/null 2>&1 8>&- 9>&- &
+            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -u -i -n -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
             return 0
         elif "$BB_BIN" nsenter -t 1 -m -n -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
-            $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -n -G "$AGH_GID" "$@" </dev/null >/dev/null 2>&1 8>&- 9>&- &
+            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -n -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
             return 0
         elif "$BB_BIN" nsenter -t 1 -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
-            $SETSID_CMD "$BB_BIN" nsenter -t 1 -G "$AGH_GID" "$@" </dev/null >/dev/null 2>&1 8>&- 9>&- &
+            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$BB_BIN" nsenter -t 1 -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
             return 0
         fi
@@ -692,41 +1256,47 @@ spawn_agh_in_root_ns() {
 
     if command -v nsenter >/dev/null 2>&1; then
         if nsenter -t 1 -m -u -i -n -p -F -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
-            $SETSID_CMD nsenter -t 1 -m -u -i -n -p -F -G "$AGH_GID" "$@" </dev/null >/dev/null 2>&1 8>&- 9>&- &
+            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -t 1 -m -u -i -n -p -F -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
             return 0
         elif nsenter -t 1 -m -u -i -n -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
-            $SETSID_CMD nsenter -t 1 -m -u -i -n -G "$AGH_GID" "$@" </dev/null >/dev/null 2>&1 8>&- 9>&- &
+            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -t 1 -m -u -i -n -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
             return 0
         elif nsenter -t 1 -m -n -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
-            $SETSID_CMD nsenter -t 1 -m -n -G "$AGH_GID" "$@" </dev/null >/dev/null 2>&1 8>&- 9>&- &
+            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -t 1 -m -n -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
             return 0
         elif nsenter -G "$AGH_GID" -t 1 "$TRUE_BIN" >/dev/null 2>&1; then
-            $SETSID_CMD nsenter -G "$AGH_GID" -t 1 "$@" </dev/null >/dev/null 2>&1 8>&- 9>&- &
+            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -G "$AGH_GID" -t 1 "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
             return 0
         elif command -v setpriv >/dev/null 2>&1 && \
              nsenter -t 1 -m -u -i -n setpriv --egid "$AGH_GID" --rgid "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
-            $SETSID_CMD nsenter -t 1 -m -u -i -n setpriv --egid "$AGH_GID" --rgid "$AGH_GID" "$@" </dev/null >/dev/null 2>&1 8>&- 9>&- &
+            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -t 1 -m -u -i -n setpriv --egid "$AGH_GID" --rgid "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
             return 0
         fi
     fi
 
-    $SETSID_CMD "$@" </dev/null >/dev/null 2>&1 8>&- 9>&- &
+    ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
     SPAWN_PID=$!
     return 0
 }
 
-# 校验配置文件有效性
+# 校验配置文件有效性（同一次持锁事务内若已对相同 SHA-256 的目标文件跑过 --check-config，则免重复加载 23 万规则）
 verify_or_restore_yaml() {
     check_f="$1"
     [ -s "$check_f" ] || return 1
     grep -q '^schema_version:' "$check_f" 2>/dev/null || return 1
     grep -q '^dns:' "$check_f" 2>/dev/null || return 1
     grep -q '^user_rules:' "$check_f" 2>/dev/null || return 1
+    if [ -n "${AGH_TX_VALIDATED_YAML_SHA:-}" ] && [ "$check_f" = "${AGH_TX_VALIDATED_YAML_FILE:-}" ] && has_op_lock_context; then
+        cur_chk_sha=$(file_hash "$check_f" 2>/dev/null || true)
+        if [ -n "$cur_chk_sha" ] && [ "$cur_chk_sha" = "$AGH_TX_VALIDATED_YAML_SHA" ]; then
+            return 0
+        fi
+    fi
     if [ -x "$BIN_DIR/AdGuardHome" ]; then
         "$BIN_DIR/AdGuardHome" --version >/dev/null 2>&1
         if [ $? -eq 0 ]; then
@@ -795,7 +1365,9 @@ ensure_agh_started() {
         return 0
     fi
 
-    disarm_nat_safety_valve >/dev/null 2>&1 || true
+    if [ "${AGH_TX_PRECLEANED:-0}" != "1" ] && has_residual_firewall_jumps; then
+        disarm_nat_safety_valve >/dev/null 2>&1 || true
+    fi
     stop_agh_wait
 
     if ! ensure_valid_config; then
@@ -975,12 +1547,20 @@ remount_nat_rules() {
         disarm_nat_safety_valve >/dev/null 2>&1 || true
         return 1
     fi
-    run_sync_child "$SH_BIN" "$SCRIPT_DIR/iptables.sh" clean >/dev/null 2>&1 || true
-    if run_sync_child "$SH_BIN" "$SCRIPT_DIR/iptables.sh" enable >/dev/null 2>&1 && nat_rules_healthy; then
+    if [ "${AGH_TX_PRECLEANED:-0}" != "1" ] || has_residual_firewall_jumps; then
+        run_sync_child "$SH_BIN" "$SCRIPT_DIR/iptables.sh" clean >/dev/null 2>&1 || true
+    fi
+    [ -n "${AGH_SWITCH_OP_ID:-}" ] && [ -z "${AGH_MONO_CLOCK_SOURCE:-}" ] && { init_monotonic_clock || true; }
+    t_mount_start=$(mono_now_ms || true)
+    if run_sync_child "$SH_BIN" "$SCRIPT_DIR/iptables.sh" enable >/dev/null 2>&1; then
+        t_mount_end=$(mono_now_ms || true)
+        log_stage_timing "mount_firewall" "ok" "$t_mount_start" "$t_mount_end" "reason=$reason"
         sni_fw_mode=$(cat "$SNI_FW_MODE_FILE" 2>/dev/null)
-        log_msg "[WATCHDOG] 已完成防火墙规则幂等重挂并通过自检 (reason=$reason, DNS=${redir_port:-55453}, SNI=${sni_fw_mode:-auto})"
+        log_msg "[WATCHDOG] 已完成防火墙规则幂等重挂并通过完整自检 (reason=$reason, mode=$active_mode, DNS=${redir_port:-55453}, SNI=${sni_fw_mode:-auto})"
         return 0
     fi
+    t_mount_end=$(mono_now_ms || true)
+    log_stage_timing "mount_firewall" "error" "$t_mount_start" "$t_mount_end" "reason=$reason"
     log_msg "[ERROR] 防火墙规则挂载或应用后检查失败 (reason=$reason)，正在释放无效接管"
     if ! disarm_nat_safety_valve; then
         log_msg "[CRITICAL] 防火墙挂载失败后的回退清理亦失败 (reason=$reason)！"
@@ -1031,7 +1611,7 @@ detect_vpn_iface() {
     echo "off"
 }
 
-# 在根命名空间与独立会话中确保全局唯一后台守护循环在线（显式关闭 FD 8 与 FD 9）
+# 在根命名空间与独立会话中确保全局唯一后台守护循环在线（显式关闭 FD 7/8/9 并清理锁继承环境）
 start_singleton_watchdog() {
     if watchdog_alive; then
         return 0
@@ -1046,20 +1626,303 @@ start_singleton_watchdog() {
         SETSID_CMD="setsid"
     fi
     if [ -n "$BB_BIN" ] && "$BB_BIN" nsenter -t 1 -m -u -i -n -p -F "$TRUE_BIN" >/dev/null 2>&1; then
-        $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -u -i -n -p -F "$SH_BIN" "$SELF_SCRIPT" --watchdog </dev/null >/dev/null 2>&1 8>&- 9>&- &
+        ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -u -i -n -p -F "$SH_BIN" "$SELF_SCRIPT" --watchdog ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
     elif [ -n "$BB_BIN" ] && "$BB_BIN" nsenter -t 1 -m -n "$TRUE_BIN" >/dev/null 2>&1; then
-        $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -n "$SH_BIN" "$SELF_SCRIPT" --watchdog </dev/null >/dev/null 2>&1 8>&- 9>&- &
+        ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -n "$SH_BIN" "$SELF_SCRIPT" --watchdog ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
     elif command -v nsenter >/dev/null 2>&1 && nsenter -t 1 -m -n "$TRUE_BIN" >/dev/null 2>&1; then
-        $SETSID_CMD nsenter -t 1 -m -n "$SH_BIN" "$SELF_SCRIPT" --watchdog </dev/null >/dev/null 2>&1 8>&- 9>&- &
+        ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -t 1 -m -n "$SH_BIN" "$SELF_SCRIPT" --watchdog ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
     else
-        $SETSID_CMD "$SH_BIN" "$SELF_SCRIPT" --watchdog </dev/null >/dev/null 2>&1 8>&- 9>&- &
+        ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$SH_BIN" "$SELF_SCRIPT" --watchdog ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
     fi
     safe_sleep 0.1 || true
 }
 
 # ==============================================================================
-# 子命令 0：按需单次诊断接口 (--diag-sni)
+# 只读 flock 诊断接口 (--diag-flock)：零修改正式锁、YAML、config.prop 或防火墙
 # ==============================================================================
+diagnose_flock_state() {
+    brief_arg="${1:-}"
+    sh_target=$(resolve_symlink_target "$SH_BIN")
+
+    if ! verify_flock_support; then
+        if [ "$brief_arg" = "--brief" ]; then
+            printf 'FLOCK_BRIEF script=%s status=FAIL impl=none bin=none cmd="" verify_steps=fail diag="%s"\n' \
+                "$SCRIPT_LABEL" "$FLOCK_LAST_DIAG"
+        else
+            printf 'SHELL_INFO sh_bin=%s sh_target=%s ksh_version="%s"\n' "$SH_BIN" "$sh_target" "${KSH_VERSION:-posix}"
+            printf 'RUN_PATHS run_dir=%s op_lock_file=%s op_diag_pid_file=%s watchdog_lock_file=%s\n' \
+                "$RUN_DIR" "$OP_LOCK_FILE" "$OP_LOCK_DIAG_PID_FILE" "$WATCHDOG_LOCK_FILE"
+            printf 'AGH_FLOCK_DIAG script=%s status=FAIL reason=no_compatible_flock diag="%s"\n' \
+                "$SCRIPT_LABEL" "$FLOCK_LAST_DIAG"
+        fi
+        return 1
+    fi
+
+    if [ "$brief_arg" = "--brief" ]; then
+        printf 'FLOCK_BRIEF script=%s status=PASS impl=%s bin=%s target=%s args="%s" verify_steps=%s\n' \
+            "$SCRIPT_LABEL" "$FLOCK_RESOLVED_IMPL" "$FLOCK_RESOLVED_BIN" "$FLOCK_RESOLVED_TARGET" \
+            "$FLOCK_RESOLVED_ARGS" "$FLOCK_VERIFY_STEPS"
+        return 0
+    fi
+
+    printf 'SHELL_INFO sh_bin=%s sh_target=%s ksh_version="%s"\n' "$SH_BIN" "$sh_target" "${KSH_VERSION:-posix}"
+    printf 'RUN_PATHS run_dir=%s op_lock_file=%s op_diag_pid_file=%s watchdog_lock_file=%s\n' \
+        "$RUN_DIR" "$OP_LOCK_FILE" "$OP_LOCK_DIAG_PID_FILE" "$WATCHDOG_LOCK_FILE"
+    printf 'SELECTED_FLOCK script=%s kind=%s impl=%s bin=%s target=%s subcmd="%s" args="%s" cmd="%s" verify_steps=%s\n' \
+        "$SCRIPT_LABEL" "$FLOCK_RESOLVED_KIND" "$FLOCK_RESOLVED_IMPL" "$FLOCK_RESOLVED_BIN" \
+        "$FLOCK_RESOLVED_TARGET" "${FLOCK_RESOLVED_SUBCMD:-none}" "$FLOCK_RESOLVED_ARGS" \
+        "$FLOCK_RESOLVED_CMD_STR" "$FLOCK_VERIFY_STEPS"
+
+    # 1. 验证三脚本 (service.sh / switch_mode.sh / iptables.sh) 工具选择一致性
+    consistency_status="PASS"
+    switch_bin_path="$SCRIPT_DIR/switch_mode.sh"
+    [ -f "$switch_bin_path" ] || switch_bin_path="${SELF_SCRIPT%/*}/scripts/switch_mode.sh"
+    ipt_bin_path="$SCRIPT_DIR/iptables.sh"
+    [ -f "$ipt_bin_path" ] || ipt_bin_path="${SELF_SCRIPT%/*}/scripts/iptables.sh"
+
+    for sub_script in "$switch_bin_path" "$ipt_bin_path"; do
+        [ -f "$sub_script" ] || continue
+        sub_out=$("$SH_BIN" "$sub_script" --diag-flock --brief 2>/dev/null || true)
+        printf '%s\n' "$sub_out"
+        sub_status=$(printf '%s\n' "$sub_out" | sed -n 's/.*status=\([^ ]*\).*/\1/p' | head -n 1)
+        sub_impl=$(printf '%s\n' "$sub_out" | sed -n 's/.*impl=\([^ ]*\).*/\1/p' | head -n 1)
+        sub_bin=$(printf '%s\n' "$sub_out" | sed -n 's/.*bin=\([^ ]*\).*/\1/p' | head -n 1)
+        if [ "$sub_status" != "PASS" ] || [ "$sub_impl" != "$FLOCK_RESOLVED_IMPL" ] || [ "$sub_bin" != "$FLOCK_RESOLVED_BIN" ]; then
+            consistency_status="FAIL"
+        fi
+    done
+
+    # 2. 父子锁验证测试（仅使用独立临时锁文件，不触碰正式锁）
+    pc_status="PASS"
+    pc_file="$RUN_DIR/.agh_flock_pc_diag.$$"
+    pc_pid_f="${pc_file}.pid"
+    rm -f "$pc_file" "$pc_pid_f" 2>/dev/null
+    (
+        exec 7<>"$pc_file" 2>/dev/null || exit 1
+        run_flock_nb 7 || exit 1
+        printf '%s\n' "$$" > "$pc_pid_f" 2>/dev/null
+        # 模拟同步子进程：关闭 7/8/9，仅验证父锁存活且不会误解父锁
+        "$SH_BIN" -c '
+            pf="$1"; pidf="$2"; pp="$3"; cbin="$4"; csub="$5"
+            [ -r "$pidf" ] && [ "$(cat "$pidf" 2>/dev/null)" = "$pp" ] || exit 1
+            exec 6<>"$pf" 2>/dev/null || exit 1
+            if [ -n "$csub" ]; then
+                if "$cbin" "$csub" -n 0 0<&6 >/dev/null 2>&1; then
+                    "$cbin" "$csub" -u 0 0<&6 >/dev/null 2>&1 || true
+                    exec 6>&- 2>/dev/null || true
+                    exit 1
+                fi
+            else
+                if "$cbin" -n 0 0<&6 >/dev/null 2>&1; then
+                    "$cbin" -u 0 0<&6 >/dev/null 2>&1 || true
+                    exec 6>&- 2>/dev/null || true
+                    exit 1
+                fi
+            fi
+            exec 6>&- 2>/dev/null || true
+            exit 0
+        ' _ "$pc_file" "$pc_pid_f" "$$" "$FLOCK_RESOLVED_BIN" "$FLOCK_RESOLVED_SUBCMD" 7>&- 8>&- 9>&- || exit 2
+        # 验证子进程退出后，父锁依然处于被锁定状态（未被子进程误解锁）
+        if ( exec 6<>"$pc_file" 2>/dev/null && run_flock_nb 6 ); then
+            run_flock_unlock 6 || true
+            exec 6>&- 2>/dev/null || true
+            exit 3
+        fi
+        run_flock_unlock 7 || true
+        exec 7>&- 2>/dev/null || true
+        # 父进程释放后应可重新加锁
+        if ! ( exec 6<>"$pc_file" 2>/dev/null && run_flock_nb 6 && { run_flock_unlock 6 || true; exec 6>&- 2>/dev/null || true; exit 0; } ); then
+            exit 4
+        fi
+        exit 0
+    ) 7>&- 8>&- 9>&- || pc_status="FAIL"
+    rm -f "$pc_file" "$pc_pid_f" 2>/dev/null
+    printf 'PARENT_CHILD_LOCK_TEST status=%s\n' "$pc_status"
+
+    # 3. 只读检查当前正式锁文件与后台进程 FD 继承状况
+    op_exists="no"; op_locked="no"
+    if [ -e "$OP_LOCK_FILE" ]; then
+        op_exists="yes"
+        is_file_kernel_locked "$OP_LOCK_FILE" && op_locked="yes"
+    fi
+    op_pid_val="none"
+    if [ -e "$OP_LOCK_DIAG_PID_FILE" ]; then
+        if [ -r "$OP_LOCK_DIAG_PID_FILE" ]; then
+            op_pid_val=$(cat "$OP_LOCK_DIAG_PID_FILE" 2>/dev/null | tr -d '\r[:space:]')
+            [ -n "$op_pid_val" ] || op_pid_val="empty"
+        else
+            op_pid_val="unreadable"
+        fi
+    fi
+
+    wd_exists="no"; wd_locked="no"
+    if [ -e "$WATCHDOG_LOCK_FILE" ]; then
+        wd_exists="yes"
+        is_file_kernel_locked "$WATCHDOG_LOCK_FILE" && wd_locked="yes"
+    fi
+    wd_pid_val=$(cat "$WATCHDOG_PID_FILE" 2>/dev/null | tr -d '\r[:space:]' || true)
+    [ -n "$wd_pid_val" ] || wd_pid_val="none"
+
+    printf 'LIVE_LOCKS op_exists=%s op_kernel_locked=%s op_diag_pid=%s watchdog_exists=%s watchdog_kernel_locked=%s watchdog_pid=%s\n' \
+        "$op_exists" "$op_locked" "$op_pid_val" "$wd_exists" "$wd_locked" "$wd_pid_val"
+
+    op_fd_leaks=0
+    wd_fd_leaks=0
+    active_op_holders=0
+    core_bin="$BIN_DIR/AdGuardHome"
+    core_bin_real=$(resolve_symlink_target "$core_bin")
+
+    for pdir in "$PROC_DIR"/[0-9]*; do
+        [ -d "$pdir" ] || continue
+        pid_num="${pdir##*/}"
+        [ "$pid_num" = "$$" ] && continue
+
+        # 优先读取 exe、comm 与 NUL 分隔的 cmdline 参数；若进程在扫描瞬间退出则安全跳过
+        p_exe=""
+        if [ -L "$pdir/exe" ] || [ -e "$pdir/exe" ]; then
+            p_exe=$(readlink -f "$pdir/exe" 2>/dev/null || readlink "$pdir/exe" 2>/dev/null || true)
+        fi
+        p_exe_clean="${p_exe% (deleted)}"
+        p_comm=$(cat "$pdir/comm" 2>/dev/null | tr -d '\r\n' || true)
+        cmdline_lines=""
+        [ -r "$pdir/cmdline" ] && cmdline_lines=$( { tr '\000' '\n' < "$pdir/cmdline"; } 2>/dev/null || true )
+        [ -d "$pdir" ] || continue
+
+        if [ -z "$p_exe_clean" ] && [ -z "$p_comm" ] && [ -z "$cmdline_lines" ]; then
+            continue
+        fi
+
+        # 精确角色识别：不再仅凭 cmdline 任意子串包含 AdGuardHome 判定核心
+        role=""
+        # 1) 核心识别：优先通过 /proc/<pid>/exe 实际路径核对，结合 comm 辅助判断
+        if [ -n "$p_exe_clean" ]; then
+            if [ "$p_exe_clean" = "$core_bin" ] || [ "$p_exe_clean" = "$core_bin_real" ]; then
+                role="core"
+            else
+                case "$p_exe_clean" in
+                    */bin/AdGuardHome|*/AdGuardHome)
+                        if [ -z "$p_comm" ] || [ "$p_comm" = "AdGuardHome" ]; then
+                            role="core"
+                        fi
+                        ;;
+                esac
+            fi
+        elif [ ! -e "$pdir/exe" ] && [ ! -L "$pdir/exe" ]; then
+            # 仅在测试模拟环境或受限内核无 /proc/<pid>/exe 时，严格要求 comm 与 argv[0] 均指向核心本身
+            argv0=$(printf '%s\n' "$cmdline_lines" | head -n 1)
+            if [ "$p_comm" = "AdGuardHome" ]; then
+                case "$argv0" in
+                    AdGuardHome|*/AdGuardHome) role="core" ;;
+                esac
+            fi
+        fi
+
+        # 2) 守护、辅助脚本与合法短期操作脚本识别（按独立参数与脚本名精确匹配）
+        wd_pid_match="n/a"
+        if [ -z "$role" ]; then
+            if printf '%s\n' "$cmdline_lines" | grep -qE '(^|/)service\.sh$' && \
+               printf '%s\n' "$cmdline_lines" | grep -qx -- '--watchdog'; then
+                role="watchdog"
+                case "$wd_pid_val" in
+                    ''|none|*[!0-9]*) wd_pid_match="unrecorded" ;;
+                    *)
+                        if [ "$pid_num" = "$wd_pid_val" ]; then
+                            wd_pid_match="yes"
+                        elif kill -0 "$wd_pid_val" 2>/dev/null || [ -d "$PROC_DIR/$wd_pid_val" ]; then
+                            wd_pid_match="mismatch"
+                        else
+                            wd_pid_match="stale_diag_pid"
+                        fi
+                        ;;
+                esac
+            elif printf '%s\n' "$cmdline_lines" | grep -qE '(^|/)ProxyConfig\.sh$'; then
+                role="proxy_cfg"
+            elif printf '%s\n' "$cmdline_lines" | grep -qE '(^|/)NoAdsService\.sh$'; then
+                role="noads"
+            elif printf '%s\n' "$cmdline_lines" | grep -qE '(^|/)(service|switch_mode|iptables|action)\.sh$'; then
+                if ! printf '%s\n' "$cmdline_lines" | grep -qxE -- '--diag-flock|diag-flock|--diag-sni|diag-sni'; then
+                    role="op_script"
+                fi
+            fi
+        fi
+
+        # 仅对已识别角色，或路径/诊断 PID 与本模块相关的 unknown 进程执行 FD 检查，无法确认核心时保持 unknown
+        if [ -z "$role" ]; then
+            relevant_proc=0
+            [ "$pid_num" = "$op_pid_val" ] && relevant_proc=1
+            [ "$pid_num" = "$wd_pid_val" ] && relevant_proc=1
+            case "$cmdline_lines" in
+                *AdGuardHome*|*agh_op*|*agh_watchdog*|*service.sh*|*switch_mode.sh*|*iptables.sh*|*ProxyConfig.sh*|*NoAdsService.sh*)
+                    relevant_proc=1
+                    ;;
+            esac
+            [ "$relevant_proc" -eq 1 ] || continue
+            role="unknown"
+        fi
+
+        [ -d "$pdir/fd" ] || continue
+        for fd_link in "$pdir/fd"/*; do
+            [ -d "$pdir" ] || break
+            [ -e "$fd_link" ] || [ -L "$fd_link" ] || continue
+            fd_num="${fd_link##*/}"
+            fd_target=""
+            if command -v readlink >/dev/null 2>&1; then
+                fd_target=$(readlink -f "$fd_link" 2>/dev/null || readlink "$fd_link" 2>/dev/null || true)
+            fi
+            [ -d "$pdir" ] || break
+            [ -n "$fd_target" ] || continue
+            case "$fd_target" in
+                *"agh_op.flock"*)
+                    if [ "$role" = "op_script" ] && { [ "$pid_num" = "$op_pid_val" ] || [ "$op_locked" = "yes" ]; }; then
+                        active_op_holders=$((active_op_holders + 1))
+                        printf 'ACTIVE_OP_LOCK_HOLDER role=%s pid=%s fd=%s diag_pid=%s target=%s\n' \
+                            "$role" "$pid_num" "$fd_num" "$op_pid_val" "$fd_target"
+                    elif [ "$role" = "watchdog" ] && [ "$pid_num" = "$op_pid_val" ] && [ "$op_locked" = "yes" ]; then
+                        active_op_holders=$((active_op_holders + 1))
+                        printf 'ACTIVE_OP_LOCK_HOLDER role=%s pid=%s fd=%s diag_pid=%s target=%s\n' \
+                            "$role" "$pid_num" "$fd_num" "$op_pid_val" "$fd_target"
+                    else
+                        op_fd_leaks=$((op_fd_leaks + 1))
+                        printf 'FD_LEAK_DETECTED lock=op role=%s pid=%s fd=%s target=%s\n' \
+                            "$role" "$pid_num" "$fd_num" "$fd_target"
+                    fi
+                    ;;
+                *"agh_watchdog.flock"*)
+                    if [ "$role" = "watchdog" ] && [ "$fd_num" = "8" ] && [ "$wd_pid_match" != "mismatch" ]; then
+                        printf 'WATCHDOG_LOCK_OK role=watchdog pid=%s fd=%s wd_pid_match=%s target=%s\n' \
+                            "$pid_num" "$fd_num" "$wd_pid_match" "$fd_target"
+                    else
+                        wd_fd_leaks=$((wd_fd_leaks + 1))
+                        printf 'FD_LEAK_DETECTED lock=watchdog role=%s pid=%s fd=%s wd_pid_match=%s target=%s\n' \
+                            "$role" "$pid_num" "$fd_num" "$wd_pid_match" "$fd_target"
+                    fi
+                    ;;
+            esac
+        done
+    done
+    printf 'FD_LEAK_CHECK op_fd_leaks=%s non_watchdog_wd_leaks=%s active_op_holders=%s\n' \
+        "$op_fd_leaks" "$wd_fd_leaks" "$active_op_holders"
+
+    overall="PASS"
+    [ "$consistency_status" != "PASS" ] && overall="FAIL"
+    [ "$pc_status" != "PASS" ] && overall="FAIL"
+    [ "$op_fd_leaks" -ne 0 ] && overall="FAIL"
+    [ "$wd_fd_leaks" -ne 0 ] && overall="FAIL"
+
+    printf 'AGH_FLOCK_DIAG script=%s status=%s impl=%s bin=%s consistency=%s parent_child=%s op_fd_leaks=%s non_watchdog_wd_leaks=%s\n' \
+        "$SCRIPT_LABEL" "$overall" "$FLOCK_RESOLVED_IMPL" "$FLOCK_RESOLVED_BIN" \
+        "$consistency_status" "$pc_status" "$op_fd_leaks" "$wd_fd_leaks"
+    [ "$overall" = "PASS" ]
+}
+
+# ==============================================================================
+# 子命令 0：按需单次诊断接口 (--diag-sni / --diag-flock)
+# ==============================================================================
+if [ "$1" = "--diag-flock" ] || [ "$1" = "diag-flock" ]; then
+    diagnose_flock_state "${2:-}"
+    exit $?
+fi
+
 if [ "$1" = "--diag-sni" ] || [ "$1" = "diag-sni" ]; then
     diagnose_sni_state
     exit 0
@@ -1080,8 +1943,17 @@ if [ "$1" = "--internal-start-and-mount-under-lock" ]; then
     reason_arg="${2:-mode-switch}"
     ensure_private_dns_off
     start_singleton_watchdog
-    if ensure_agh_started && remount_nat_rules "$reason_arg"; then
-        exit 0
+    [ -n "${AGH_SWITCH_OP_ID:-}" ] && [ -z "${AGH_MONO_CLOCK_SOURCE:-}" ] && { init_monotonic_clock || true; }
+    t_core_start=$(mono_now_ms || true)
+    if ensure_agh_started; then
+        t_core_end=$(mono_now_ms || true)
+        log_stage_timing "start_core_ready" "ok" "$t_core_start" "$t_core_end" "mode=${active_mode:-unknown}"
+        if remount_nat_rules "$reason_arg"; then
+            exit 0
+        fi
+    else
+        t_core_end=$(mono_now_ms || true)
+        log_stage_timing "start_core_ready" "error" "$t_core_start" "$t_core_end" "mode=${active_mode:-unknown}"
     fi
     disarm_nat_safety_valve >/dev/null 2>&1 || true
     exit 1
@@ -1092,6 +1964,9 @@ fi
 # 每 30 秒低功耗巡检一次，零 Wakelock，操作锁仅在需要恢复时短暂获取，休眠期间绝不持有操作锁
 # ==============================================================================
 if [ "$1" = "--watchdog" ]; then
+    unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID
+    OP_LOCK_OWNED=0
+    OP_LOCK_INHERITED=0
     escape_app_cgroup "$$"
     if ! acquire_watchdog_lock; then
         exit 0
@@ -1205,7 +2080,7 @@ if [ "$1" = "--watchdog" ]; then
 
         # 4. 仅当用户配置了非空 PROXY_URL 订阅链接时，执行单次同步
         if [ -n "$PROXY_URL_CLEAN" ] && [ -f "$SCRIPT_DIR/ProxyConfig.sh" ]; then
-            "$SH_BIN" "$SCRIPT_DIR/ProxyConfig.sh" --once >/dev/null 2>&1 8>&- 9>&-
+            AGH_OP_LOCK_HELD="" AGH_OP_LOCK_HOLDER_PID="" "$SH_BIN" "$SCRIPT_DIR/ProxyConfig.sh" --once </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&-
         fi
     done
     exit 0
@@ -1223,7 +2098,9 @@ if [ "$1" = "restart" ] || [ "$1" = "--restart" ]; then
     clear_stop_locks
     ensure_private_dns_off
     clean_deleted_app_dirs
-    disarm_nat_safety_valve >/dev/null 2>&1 || true
+    if [ "${AGH_TX_PRECLEANED:-0}" != "1" ] && has_residual_firewall_jumps; then
+        disarm_nat_safety_valve >/dev/null 2>&1 || true
+    fi
     stop_agh_wait
     start_singleton_watchdog
     if ensure_agh_started; then
@@ -1362,9 +2239,9 @@ if ! nat_rules_healthy; then
     fi
 fi
 
-[ -f "$SCRIPT_DIR/NoAdsService.sh" ] && "$SH_BIN" "$SCRIPT_DIR/NoAdsService.sh" >/dev/null 2>&1 8>&- 9>&- &
+[ -f "$SCRIPT_DIR/NoAdsService.sh" ] && AGH_OP_LOCK_HELD="" AGH_OP_LOCK_HOLDER_PID="" "$SH_BIN" "$SCRIPT_DIR/NoAdsService.sh" </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
 if [ -n "$PROXY_URL_CLEAN" ] && [ -f "$SCRIPT_DIR/ProxyConfig.sh" ]; then
-    "$SH_BIN" "$SCRIPT_DIR/ProxyConfig.sh" --once >/dev/null 2>&1 8>&- 9>&- &
+    AGH_OP_LOCK_HELD="" AGH_OP_LOCK_HOLDER_PID="" "$SH_BIN" "$SCRIPT_DIR/ProxyConfig.sh" --once </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
 fi
 
 start_singleton_watchdog

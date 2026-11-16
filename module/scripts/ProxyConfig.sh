@@ -21,6 +21,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
 CONFIG_FILE="${CONFIG_FILE:-$SCRIPT_DIR/config.prop}"
 MAIN_LOG="${MAIN_LOG:-$AGH_DIR/agh.log}"
 OWNERSHIP_DIR="${OWNERSHIP_DIR:-$AGH_DIR/proxy_ownership}"
+if [ -z "${RUN_DIR:-}" ]; then
+    if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+        RUN_DIR="/dev/shm"
+    else
+        RUN_DIR="$AGH_DIR/run"
+    fi
+fi
+
+if [ -f "$SCRIPT_DIR/diag_log.sh" ]; then
+    . "$SCRIPT_DIR/diag_log.sh"
+elif [ -f "${MODDIR:-/data/adb/modules/AdGuardHome}/scripts/diag_log.sh" ]; then
+    . "${MODDIR:-/data/adb/modules/AdGuardHome}/scripts/diag_log.sh"
+fi
 
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
 redir_port="${redir_port:-55453}"
@@ -46,7 +59,11 @@ ALL_SECTIONS="direct-nameserver: proxy-server-nameserver: nameserver: default-na
 
 log_msg() {
     msg="$1"
-    echo "$(date '+%F %T') [ProxyConfig] $msg" >> "$MAIN_LOG" 2>/dev/null
+    if command -v agh_log_always >/dev/null 2>&1; then
+        agh_log_always "[ProxyConfig] $msg"
+    else
+        echo "$(date '+%F %T') [ProxyConfig] $msg" >> "$MAIN_LOG" 2>/dev/null || true
+    fi
     echo "[ProxyConfig] $msg"
 }
 
@@ -874,6 +891,7 @@ run_pass() {
 $PROXY_CONFIGS
 EOF
     [ "$had_error" -ne 0 ] && return 1
+    command -v agh_log_debug >/dev/null 2>&1 && agh_log_debug "[ProxyConfig] run_pass completed mode=${pass_mode:-sync} had_error=$had_error"
     return 0
 }
 
