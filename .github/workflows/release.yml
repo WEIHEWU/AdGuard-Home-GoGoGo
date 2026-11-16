@@ -22,7 +22,7 @@ jobs:
         run: |
           case "${GITHUB_REF_NAME:-}" in
             v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
-            *)  VERSION_TAG="v20261116.2-rc.2" ;;
+            *)  VERSION_TAG="v20261116.2-rc.3" ;;
           esac
           VERSION_DATE="${VERSION_TAG#v}"
           case "$VERSION_TAG" in
@@ -47,9 +47,9 @@ jobs:
           body: |
             ### 🚀 AdGuard Home GoGoGo `${{ env.VERSION_TAG }}` (Candidate / Pre-release)
 
-            基于既有满血 DNS + SNI (`443`/`8443`) 双链架构（100% 保持全部过滤订阅、默认规则、DNS 上游与 SNI 检查范围不变），集成 **[AdGuard-Home-GoGoGo-Core v2026-11-16-rc.2](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core)** 与 **[AdGuard-Home-GoGoGo-Manager v2.24.23-rc.1](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager)**：
+            基于既有满血 DNS + SNI (`443`/`8443`) 双链架构（100% 保持全部过滤订阅、默认规则、DNS 上游与 SNI 检查范围不变），集成 **[AdGuard-Home-GoGoGo-Core v2026-11-16-rc.3](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core)** 与 **[AdGuard-Home-GoGoGo-Manager v2.24.24-rc.1](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager)**：
 
-            > ⚠️ Candidate pre-release: Core race/unit/android_slim (Linux ARM64) tests, Manager static analysis & 34 unit/widget/HTTP mock tests, and module shell sandbox regression suite (TEST 1-9) all passed; real-device interactive testing on Android is pending.
+            > ⚠️ Candidate pre-release: Core race/unit/android_slim (Linux ARM64) tests, Manager static analysis & 35 unit/widget/HTTP mock tests, and module shell sandbox regression suite (TEST 1-9) all passed; real-device interactive testing on Android is pending.
 
             1. **🔍 Core + Manager 误杀排错补修升级 (`rc.2`)**:
                - 核心新增 `/control/filtering/set_rules` 原子 `expected_revision` 条件更新与 `409` 并发冲突保护，并补齐 `android_slim` 下 `querylog`/`snifilter` 实测覆盖（含 `FilteredSNI`、`blocked_summary` 容量/过期/匿名化与隐私策略）；
