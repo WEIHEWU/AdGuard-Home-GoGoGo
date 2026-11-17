@@ -24,7 +24,7 @@ jobs:
         run: |
           case "${GITHUB_REF_NAME:-}" in
             v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
-            *)  VERSION_TAG="v20261117.1" ;;
+            *)  VERSION_TAG="v20261117.2-rc.1" ;;
           esac
           VERSION_DATE="${VERSION_TAG#v}"
           case "$VERSION_TAG" in
@@ -56,18 +56,12 @@ jobs:
           body: |
             ### AdGuard Home GoGoGo `${{ env.VERSION_TAG }}`
 
-            基于既有满血 DNS + SNI (`443`/`8443`) 双链架构（100% 保持全部过滤订阅、默认规则、DNS 上游与 SNI 检查范围不变），内置 **[AdGuard-Home-GoGoGo-Core v2026-11-16-rc.3](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core)** 与 **[AdGuard-Home-GoGoGo-Manager v2.24.26](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager)**：
+            基于 `v20261117.1` 正式版（100% 保持 Core `v2026-11-16-rc.3`、过滤订阅、默认规则、DNS/SNI/VPN 策略与来源记录逻辑不变），内置 **[AdGuard-Home-GoGoGo-Core v2026-11-16-rc.3](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core)** 与 **[AdGuard-Home-GoGoGo-Manager v2.24.27-rc.1](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager)**：
 
-            > ⚠️ **验证与实机状态说明**：Core（Linux ARM64、`android_slim`、`race`/单元测试）、Manager 静态分析与 46 项单元/Widget/本地模拟 HTTP 回归测试、APK 签名及包体校验均已通过；本端环境未连接实机（`adb devices -l` 为空），完整实机端到端交互验收待实机检验。
+            > ⚠️ **验证与实机状态说明**：Core 二进制与模块脚本未变更（沿用已验证 `c5e38874...`），Manager 静态分析、48 项单元与 Widget 测试（含“聚合重复”状态展示/主题/防溢出测试）、APK 签名及刷机包体核验已通过；本端环境未连接实机（`adb devices -l` 为空），实机端到端交互验收待实机检验。当前为预发布版本，不覆盖 `v20261117.1` Latest 稳定版。
 
-            #### 主要包含特性
-            - **模式切换及 Android `flock` 兼容修复**：父 Shell 统一初始化单调时钟记录各阶段耗时、消除重复配置校验，并在单次 `post_apply_check` 核对 `443`/`8443` NFQUEUE、`--queue-bypass` 与核心 `GID 23333` 豁免。
-            - **调试日志开关与脱敏诊断包导出**：默认关闭且支持自动过期的模块详细调试日志（独立日志锁短事务轮转），配合管理器一键导出全链路脱敏诊断 ZIP（不含手动规则与备注隐私）并调用系统分享。
-            - **实时误杀排错、SNI 记录及阻断聚合**：基于离线 PSL（ICANN + PRIVATE）实时检测 `A` / `AAAA` 规则命中，展示核心 `FilteredSNI` 与阻断摘要/同秒聚合。
-            - **用户确认的分级放行与安全撤销**：由用户明确确认两级放行规则，写前排队 + `expected_revision` + 写后绑定 `X-User-Rules-Revision` 与核心实例 ID 防止跨客户端或重启误撤。
-            - **手动规则来源、备注和集中管理**：严格绑定本端提交与回读版本；区分“历史来源（手动新增/用户认领）”与“当前关联（已确认/已不存在/待确认/重复歧义）”；支持“我的手动规则”页、实时核验与备份导出/校验导入。
-
-            > ℹ️ **存储与关联说明**：手动来源记录和备注保存在管理器本地，正常升级及软重启应保持；卸载或清除应用数据可能丢失，请使用备份功能。核心重启或外部规则修改后，“当前关联”可能变为待确认，不代表规则被删除。
+            #### 主要更新
+            - **修复日志“聚合重复”右侧状态缺失**：管理器新增共用 `LogStatusIndicator`，在聚合条目右侧同时显示状态图标/文字与展开箭头，严格依据 `group.reason` 复用 `getFilteredStatus()`，并保留 `predicted_blocked` 暂停放行预测提示。
           files: |
             releases/AdGuard_Home_gogogo_${{ env.VERSION_DATE }}.zip
             releases/AdGuardHomeManager.apk
