@@ -103,6 +103,7 @@ OP_LOCK_DIAG_PID_FILE="$(resolve_abs_path "$RUN_DIR/agh_op.pid")"
 SESSION_STOP_FILE="$(resolve_abs_path "$RUN_DIR/agh_manual_stop")"
 IPV6_DNS_MODE_FILE="$(resolve_abs_path "$RUN_DIR/agh_ipv6_dns_mode")"
 SNI_FW_MODE_FILE="$(resolve_abs_path "$RUN_DIR/agh_sni_fw_mode")"
+SNI_QUEUE_NUM_FILE="$(resolve_abs_path "$RUN_DIR/agh_sni_queue_num")"
 
 # 系统语言检测
 locale=$(getprop persist.sys.locale 2>/dev/null)
@@ -1022,8 +1023,12 @@ is_manually_stopped() {
     if [ "${STOPPED:-0}" = "1" ] || [ "${MANUAL_STOP:-0}" = "1" ]; then
         return 0
     fi
-    if [ -f "$SCRIPT_DIR/config.prop" ] && grep -qE '^(STOPPED|MANUAL_STOP)=1$' "$SCRIPT_DIR/config.prop" 2>/dev/null; then
-        return 0
+    if [ -r "$SCRIPT_DIR/config.prop" ]; then
+        while IFS= read -r _cfg_line || [ -n "$_cfg_line" ]; do
+            case "$_cfg_line" in
+                STOPPED=1|MANUAL_STOP=1) return 0 ;;
+            esac
+        done < "$SCRIPT_DIR/config.prop"
     fi
     return 1
 }
@@ -1220,6 +1225,16 @@ build_ca_bundle() {
     fi
 }
 
+reset_spawn_priority() {
+    _rsp_pid="${1:-}"
+    case "$_rsp_pid" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    renice -n 0 -p "$_rsp_pid" >/dev/null 2>&1 || \
+        renice 0 "$_rsp_pid" >/dev/null 2>&1 || \
+        { [ -n "$BB_BIN" ] && "$BB_BIN" renice 0 "$_rsp_pid" >/dev/null 2>&1; } || true
+}
+
 # 以 setsid + BusyBox/util-linux nsenter 切入 PID 1 根命名空间与专属 GID 23333
 # 关键：显式关闭 FD 7/8/9 并清理锁继承环境变量，杜绝 AdGuardHome 核心进程意外继承守护锁或操作锁！
 spawn_agh_in_root_ns() {
@@ -1238,18 +1253,22 @@ spawn_agh_in_root_ns() {
         if "$BB_BIN" nsenter -t 1 -m -u -i -n -p -F -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
             ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -u -i -n -p -F -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
+            reset_spawn_priority "$SPAWN_PID"
             return 0
         elif "$BB_BIN" nsenter -t 1 -m -u -i -n -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
             ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -u -i -n -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
+            reset_spawn_priority "$SPAWN_PID"
             return 0
         elif "$BB_BIN" nsenter -t 1 -m -n -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
             ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -n -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
+            reset_spawn_priority "$SPAWN_PID"
             return 0
         elif "$BB_BIN" nsenter -t 1 -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
             ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$BB_BIN" nsenter -t 1 -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
+            reset_spawn_priority "$SPAWN_PID"
             return 0
         fi
     fi
@@ -1258,29 +1277,35 @@ spawn_agh_in_root_ns() {
         if nsenter -t 1 -m -u -i -n -p -F -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
             ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -t 1 -m -u -i -n -p -F -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
+            reset_spawn_priority "$SPAWN_PID"
             return 0
         elif nsenter -t 1 -m -u -i -n -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
             ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -t 1 -m -u -i -n -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
+            reset_spawn_priority "$SPAWN_PID"
             return 0
         elif nsenter -t 1 -m -n -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
             ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -t 1 -m -n -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
+            reset_spawn_priority "$SPAWN_PID"
             return 0
         elif nsenter -G "$AGH_GID" -t 1 "$TRUE_BIN" >/dev/null 2>&1; then
             ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -G "$AGH_GID" -t 1 "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
+            reset_spawn_priority "$SPAWN_PID"
             return 0
         elif command -v setpriv >/dev/null 2>&1 && \
              nsenter -t 1 -m -u -i -n setpriv --egid "$AGH_GID" --rgid "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
             ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -t 1 -m -u -i -n setpriv --egid "$AGH_GID" --rgid "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
+            reset_spawn_priority "$SPAWN_PID"
             return 0
         fi
     fi
 
     ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
     SPAWN_PID=$!
+    reset_spawn_priority "$SPAWN_PID"
     return 0
 }
 
@@ -1485,49 +1510,129 @@ ensure_agh_started() {
     return 1
 }
 
-# 仅读取模块自有链检查防火墙健康状态（避免全表扫描，覆盖 UDP+TCP 53 重定向、DoT、记录的 IPv6 模式及 SNI 链）
+# 仅使用系统主链 -C + 自有小链单链 -S 纯 Shell 解析核验防火墙健康状态（无 -L、无主链 -S、无 grep，覆盖 UDP+TCP 53、GID 防环回、DoT、IPv6 及 SNI 链）
 nat_rules_healthy() {
     check_port="${redir_port:-55453}"
     check_sni="${ENABLE_SNI:-1}"
 
-    # 1. IPv4 nat OUTPUT 跳转与 ADGUARD 自有链检查（覆盖 UDP 53 与 TCP 53）
-    nat_out_dump=$(iptables -w 2 -t nat -S OUTPUT 2>/dev/null) || return 1
-    jump_cnt=$(printf '%s\n' "$nat_out_dump" | grep -c -- '^-A OUTPUT -j ADGUARD$')
-    [ "$jump_cnt" -eq 1 ] || return 1
+    # 1. IPv4 nat OUTPUT 主链跳转 (-C) 与 ADGUARD 自有链单链核验 (-S，纯 Shell 解析，0 grep)
+    iptables -w 2 -t nat -C OUTPUT -j ADGUARD >/dev/null 2>&1 || return 1
+    _adg_chain="$(iptables -w 2 -t nat -S ADGUARD 2>/dev/null || true)"
+    [ -n "$_adg_chain" ] || return 1
+    _adg_lo_udp=0
+    _adg_lo_tcp=0
+    _adg_gid=0
+    _adg_udp=0
+    _adg_tcp=0
+    _nrh_old_ifs="$IFS"
+    IFS='
+'
+    set -f
+    for _adg_line in $_adg_chain; do
+        case "$_adg_line" in
+            *"-A ADGUARD -d 127.0.0.1"*"-p udp "*"--dport 53 "*"-j REDIRECT --to-ports $check_port"|*"-A ADGUARD -d 127.0.0.1"*"-p udp "*"--dport 53 "*"-j REDIRECT --to-ports $check_port "*)
+                _adg_lo_udp=1 ;;
+            *"-A ADGUARD -d 127.0.0.1"*"-p tcp "*"--dport 53 "*"-j REDIRECT --to-ports $check_port"|*"-A ADGUARD -d 127.0.0.1"*"-p tcp "*"--dport 53 "*"-j REDIRECT --to-ports $check_port "*)
+                _adg_lo_tcp=1 ;;
+            *"-A ADGUARD "*"--gid-owner $AGH_GID "*"-j RETURN"*)
+                _adg_gid=1 ;;
+            "-A ADGUARD -p udp "*"--dport 53 "*"-j REDIRECT --to-ports $check_port"|"-A ADGUARD -p udp "*"--dport 53 "*"-j REDIRECT --to-ports $check_port "*)
+                _adg_udp=1 ;;
+            "-A ADGUARD -p tcp "*"--dport 53 "*"-j REDIRECT --to-ports $check_port"|"-A ADGUARD -p tcp "*"--dport 53 "*"-j REDIRECT --to-ports $check_port "*)
+                _adg_tcp=1 ;;
+        esac
+    done
+    set +f
+    IFS="$_nrh_old_ifs"
+    [ "$_adg_lo_udp" -eq 1 ] && [ "$_adg_lo_tcp" -eq 1 ] && [ "$_adg_gid" -eq 1 ] && \
+        [ "$_adg_udp" -eq 1 ] && [ "$_adg_tcp" -eq 1 ] || return 1
 
-    adg_chain=$(iptables -w 2 -t nat -S ADGUARD 2>/dev/null) || return 1
-    printf '%s\n' "$adg_chain" | grep -qE -- "^-A ADGUARD -d 127\.0\.0\.1/32 -p udp .*--dport 53 -j REDIRECT --to-ports ${check_port}([[:space:]]|\$)" || return 1
-    printf '%s\n' "$adg_chain" | grep -qE -- "^-A ADGUARD -d 127\.0\.0\.1/32 -p tcp .*--dport 53 -j REDIRECT --to-ports ${check_port}([[:space:]]|\$)" || return 1
-    printf '%s\n' "$adg_chain" | grep -q -- "--gid-owner $AGH_GID -j RETURN" || return 1
-    printf '%s\n' "$adg_chain" | grep -qE -- "^-A ADGUARD .*-p udp .*--dport 53 -j REDIRECT --to-ports ${check_port}([[:space:]]|\$)" || return 1
-    printf '%s\n' "$adg_chain" | grep -qE -- "^-A ADGUARD .*-p tcp .*--dport 53 -j REDIRECT --to-ports ${check_port}([[:space:]]|\$)" || return 1
-
-    # 2. filter 表 ADGUARD_DOT 与 AGH_INPUT 检查
+    # 2. filter 表 ADGUARD_DOT 与 AGH_INPUT 主链跳转检查 (-C)
     iptables -w 2 -t filter -C OUTPUT -j ADGUARD_DOT >/dev/null 2>&1 || return 1
     iptables -w 2 -t filter -C INPUT -j AGH_INPUT >/dev/null 2>&1 || return 1
 
-    # 3. IPv6 接管链检查（依据挂载时记录的实际内核能力模式，避免不支持 ip6tables nat 的内核无限重挂）
-    v6_mode=$(cat "$IPV6_DNS_MODE_FILE" 2>/dev/null)
+    # 3. IPv6 接管链精确检查（依据挂载时记录的实际内核能力模式，避免不支持 ip6tables nat 的内核无限重挂）
+    v6_mode=""
+    [ -r "$IPV6_DNS_MODE_FILE" ] && { IFS= read -r v6_mode < "$IPV6_DNS_MODE_FILE" 2>/dev/null || v6_mode=""; }
     if [ "$v6_mode" = "nat" ]; then
         ip6tables -w 2 -t nat -C OUTPUT -j ADGUARD6_NAT >/dev/null 2>&1 || return 1
-        adg6_chain=$(ip6tables -w 2 -t nat -S ADGUARD6_NAT 2>/dev/null) || return 1
-        printf '%s\n' "$adg6_chain" | grep -qE -- "^-A ADGUARD6_NAT .*-p udp .*--dport 53 -j REDIRECT --to-ports ${check_port}([[:space:]]|\$)" || return 1
-        printf '%s\n' "$adg6_chain" | grep -qE -- "^-A ADGUARD6_NAT .*-p tcp .*--dport 53 -j REDIRECT --to-ports ${check_port}([[:space:]]|\$)" || return 1
+        _adg6_chain="$(ip6tables -w 2 -t nat -S ADGUARD6_NAT 2>/dev/null || true)"
+        [ -n "$_adg6_chain" ] || return 1
+        _adg6_udp=0
+        _adg6_tcp=0
+        _nrh_old_ifs="$IFS"
+        IFS='
+'
+        set -f
+        for _adg6_line in $_adg6_chain; do
+            case "$_adg6_line" in
+                "-A ADGUARD6_NAT -p udp "*"--dport 53 "*"-j REDIRECT --to-ports $check_port"|"-A ADGUARD6_NAT -p udp "*"--dport 53 "*"-j REDIRECT --to-ports $check_port "*)
+                    _adg6_udp=1 ;;
+                "-A ADGUARD6_NAT -p tcp "*"--dport 53 "*"-j REDIRECT --to-ports $check_port"|"-A ADGUARD6_NAT -p tcp "*"--dport 53 "*"-j REDIRECT --to-ports $check_port "*)
+                    _adg6_tcp=1 ;;
+            esac
+        done
+        set +f
+        IFS="$_nrh_old_ifs"
+        [ "$_adg6_udp" -eq 1 ] && [ "$_adg6_tcp" -eq 1 ] || return 1
     elif [ "$v6_mode" = "filter" ]; then
         ip6tables -w 2 -t filter -C OUTPUT -j ADGUARD6 >/dev/null 2>&1 || return 1
     fi
 
-    # 4. mangle 表 AGH_SNI 自有链检查
+    # 4. mangle 表 AGH_SNI 自有链检查（OUTPUT 跳转用 -C，AGH_SNI 用单链 -S 纯 Shell 解析，规避 iptables-nft -C 对 connbytes+NFQUEUE 的误判）
     if [ "$check_sni" = "1" ]; then
-        sni_fw_mode=$(cat "$SNI_FW_MODE_FILE" 2>/dev/null)
-        if [ "$sni_fw_mode" != "unsupported" ]; then
-            mangle_out=$(iptables -w 2 -t mangle -S OUTPUT 2>/dev/null) || return 1
-            sni_jump_cnt=$(printf '%s\n' "$mangle_out" | grep -c -- '^-A OUTPUT -j AGH_SNI$')
-            [ "$sni_jump_cnt" -eq 1 ] || return 1
-            sni_chain=$(iptables -w 2 -t mangle -S AGH_SNI 2>/dev/null) || return 1
-            printf '%s\n' "$sni_chain" | grep -qE -- "^-A AGH_SNI .*-m owner --gid-owner ${AGH_GID} -j RETURN([[:space:]]|\$)" || return 1
-            printf '%s\n' "$sni_chain" | grep -qE -- "^-A AGH_SNI .*-p tcp .*--dport 443 .*-j NFQUEUE .*--queue-bypass" || return 1
-            printf '%s\n' "$sni_chain" | grep -qE -- "^-A AGH_SNI .*-p tcp .*--dport 8443 .*-j NFQUEUE .*--queue-bypass" || return 1
+        sni_fw_mode=""
+        [ -r "$SNI_FW_MODE_FILE" ] && { IFS= read -r sni_fw_mode < "$SNI_FW_MODE_FILE" 2>/dev/null || sni_fw_mode=""; }
+        if [ "$sni_fw_mode" != "unsupported" ] && [ "$sni_fw_mode" != "disabled" ]; then
+            sni_queue="0"
+            if [ -r "$SNI_QUEUE_NUM_FILE" ]; then
+                IFS= read -r sni_queue < "$SNI_QUEUE_NUM_FILE" 2>/dev/null || sni_queue="0"
+            fi
+            case "$sni_queue" in
+                ''|*[!0-9]*) sni_queue="0" ;;
+            esac
+
+            iptables -w 2 -t mangle -C OUTPUT -j AGH_SNI >/dev/null 2>&1 || return 1
+            _sni_chain="$(iptables -w 2 -t mangle -S AGH_SNI 2>/dev/null || true)"
+            [ -n "$_sni_chain" ] || return 1
+            _sni_gid=0
+            _sni_has_443=0
+            _sni_has_8443=0
+            _nrh_old_ifs="$IFS"
+            IFS='
+'
+            set -f
+            for _sni_line in $_sni_chain; do
+                case "$_sni_line" in
+                    *"-A AGH_SNI "*"-m owner "*"--gid-owner $AGH_GID "*"-j RETURN"*)
+                        _sni_gid=1 ;;
+                    *"-A AGH_SNI "*"-p tcp "*"-j NFQUEUE"*"--queue-bypass"*)
+                        if [ "$sni_fw_mode" = "connbytes" ]; then
+                            case "$_sni_line" in
+                                *"connbytes"*"1:4"*) ;;
+                                *) continue ;;
+                            esac
+                        fi
+                        if [ "$sni_queue" = "0" ]; then
+                            case "$_sni_line" in
+                                *"--queue-num "[1-9]*) continue ;;
+                            esac
+                        else
+                            case "$_sni_line" in
+                                *"--queue-num $sni_queue "*|*"--queue-num $sni_queue") ;;
+                                *) continue ;;
+                            esac
+                        fi
+                        case "$_sni_line" in
+                            *"--dport 443 "*) _sni_has_443=1 ;;
+                            *"--dport 8443 "*) _sni_has_8443=1 ;;
+                        esac
+                        ;;
+                esac
+            done
+            set +f
+            IFS="$_nrh_old_ifs"
+            [ "$_sni_gid" -eq 1 ] && [ "$_sni_has_443" -eq 1 ] && [ "$_sni_has_8443" -eq 1 ] || return 1
         fi
     fi
     return 0
@@ -1601,17 +1706,187 @@ diagnose_sni_state() {
     return 0
 }
 
-detect_vpn_iface() {
-    for iface in /sys/class/net/tun* /sys/class/net/wg* /sys/class/net/ppp*; do
+detect_vpn_iface_fast() {
+    _vpn_sys_net="${AGH_SYS_NET_DIR:-/sys/class/net}"
+    VPN_IFACE_STATE="off"
+    for iface in "$_vpn_sys_net"/tun* "$_vpn_sys_net"/wg* "$_vpn_sys_net"/ppp*; do
         if [ -d "$iface" ]; then
-            echo "on"
+            VPN_IFACE_STATE="on"
             return 0
         fi
     done
-    echo "off"
+    return 0
 }
 
-# 在根命名空间与独立会话中确保全局唯一后台守护循环在线（显式关闭 FD 7/8/9 并清理锁继承环境）
+detect_vpn_iface() {
+    detect_vpn_iface_fast
+    printf '%s\n' "$VPN_IFACE_STATE"
+}
+
+# 纯 Shell 极速检测目标 PID 是否仍真实存活（校验目录存在、comm 匹配且未处于 Z 僵尸/X 死亡状态，零外部 fork）
+is_pid_alive_fast() {
+    _alive_pid="$1"
+    _alive_exp_comm="${2:-}"
+    case "$_alive_pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ -d "$PROC_DIR/$_alive_pid" ] || return 1
+    if [ -n "$_alive_exp_comm" ]; then
+        if [ -r "$PROC_DIR/$_alive_pid/comm" ]; then
+            IFS= read -r _alive_comm < "$PROC_DIR/$_alive_pid/comm" 2>/dev/null || _alive_comm=""
+            [ "$_alive_comm" = "$_alive_exp_comm" ] || return 1
+        else
+            return 1
+        fi
+    fi
+    if [ -r "$PROC_DIR/$_alive_pid/status" ]; then
+        while IFS= read -r _status_line; do
+            case "$_status_line" in
+                State:*)
+                    case "$_status_line" in
+                        *[ZX]*) return 1 ;;
+                    esac
+                    break
+                    ;;
+            esac
+        done < "$PROC_DIR/$_alive_pid/status"
+    fi
+    return 0
+}
+
+is_agh_pid_alive_fast() {
+    is_pid_alive_fast "$1" "AdGuardHome"
+}
+
+NETD_PID=""
+NETD_COMM=""
+NETD_TRACKING_ACTIVE=0
+SYS_SERVER_PID=""
+SYS_SERVER_COMM=""
+SYS_SERVER_TRACKING_ACTIVE=0
+AGH_PID=""
+
+resolve_agh_pid() {
+    AGH_PID=""
+    if [ -r "$PID_FILE" ]; then
+        IFS= read -r _rap_p < "$PID_FILE" 2>/dev/null || _rap_p=""
+        if is_agh_pid_alive_fast "$_rap_p"; then
+            AGH_PID="$_rap_p"
+            return 0
+        fi
+    fi
+    if agh_running && [ -r "$PID_FILE" ]; then
+        IFS= read -r _rap_p < "$PID_FILE" 2>/dev/null || _rap_p=""
+        if is_pid_alive_fast "$_rap_p" "AdGuardHome"; then
+            AGH_PID="$_rap_p"
+        fi
+    fi
+    [ -n "$AGH_PID" ]
+}
+
+# 共享查找辅助：通过覆写文件 / 系统属性 / pidof / /proc/<pid>/comm 解析系统守护进程 PID（结果写入 RESOLVED_PID / RESOLVED_COMM）
+resolve_proc_pid_by_comm() {
+    _rpb_comm_target="$1"
+    _rpb_override_file="${2:-}"
+    _rpb_prop_name="${3:-}"
+    RESOLVED_PID=""
+    RESOLVED_COMM=""
+
+    if [ -n "$_rpb_override_file" ] && [ -r "$_rpb_override_file" ]; then
+        IFS= read -r _rpb_p < "$_rpb_override_file" 2>/dev/null || _rpb_p=""
+        case "$_rpb_p" in
+            ''|*[!0-9]*) _rpb_p="" ;;
+            *)
+                [ -d "$PROC_DIR/$_rpb_p" ] || _rpb_p=""
+                ;;
+        esac
+    else
+        _rpb_p=""
+    fi
+
+    if [ -z "$_rpb_p" ] && [ -n "$_rpb_prop_name" ]; then
+        _rpb_p=$(getprop "$_rpb_prop_name" 2>/dev/null || true)
+        case "$_rpb_p" in
+            ''|*[!0-9]*) _rpb_p="" ;;
+            *)
+                [ -d "$PROC_DIR/$_rpb_p" ] || _rpb_p=""
+                ;;
+        esac
+    fi
+
+    if [ -z "$_rpb_p" ]; then
+        for _rpb_cand in $(pidof "$_rpb_comm_target" 2>/dev/null); do
+            case "$_rpb_cand" in
+                ''|*[!0-9]*) continue ;;
+            esac
+            if [ -d "$PROC_DIR/$_rpb_cand" ]; then
+                _rpb_p="$_rpb_cand"
+                break
+            fi
+        done
+    fi
+
+    if [ -z "$_rpb_p" ]; then
+        for _rpb_cf in "$PROC_DIR"/[0-9]*/comm; do
+            [ -r "$_rpb_cf" ] || continue
+            IFS= read -r _rpb_comm < "$_rpb_cf" 2>/dev/null || continue
+            if [ "$_rpb_comm" = "$_rpb_comm_target" ]; then
+                _rpb_dir="${_rpb_cf%/comm}"
+                _rpb_cand="${_rpb_dir##*/}"
+                case "$_rpb_cand" in
+                    ''|*[!0-9]*) continue ;;
+                esac
+                if [ -d "$PROC_DIR/$_rpb_cand" ]; then
+                    _rpb_p="$_rpb_cand"
+                    break
+                fi
+            fi
+        done
+    fi
+
+    [ -n "$_rpb_p" ] || return 1
+    RESOLVED_PID="$_rpb_p"
+    if [ -r "$PROC_DIR/$_rpb_p/comm" ]; then
+        IFS= read -r RESOLVED_COMM < "$PROC_DIR/$_rpb_p/comm" 2>/dev/null || RESOLVED_COMM="$_rpb_comm_target"
+    else
+        RESOLVED_COMM=""
+    fi
+    return 0
+}
+
+resolve_netd_pid() {
+    NETD_PID=""
+    NETD_COMM=""
+    NETD_TRACKING_ACTIVE=0
+    if resolve_proc_pid_by_comm "netd" "${AGH_NETD_PID_FILE:-}" "init.svc_debug_pid.netd"; then
+        NETD_PID="$RESOLVED_PID"
+        NETD_COMM="${RESOLVED_COMM:-}"
+        NETD_TRACKING_ACTIVE=1
+        return 0
+    fi
+    return 1
+}
+
+resolve_sys_server_pid() {
+    SYS_SERVER_PID=""
+    SYS_SERVER_COMM=""
+    SYS_SERVER_TRACKING_ACTIVE=0
+    if resolve_proc_pid_by_comm "system_server" "${AGH_SYS_SERVER_PID_FILE:-}" ""; then
+        SYS_SERVER_PID="$RESOLVED_PID"
+        SYS_SERVER_COMM="${RESOLVED_COMM:-}"
+        SYS_SERVER_TRACKING_ACTIVE=1
+        return 0
+    fi
+    return 1
+}
+
+refresh_watchdog_cached_pids() {
+    resolve_agh_pid || true
+    resolve_netd_pid || true
+    resolve_sys_server_pid || true
+}
+
+# 在根命名空间与独立会话中以最低调度优先级 (nice 19) 确保全局唯一后台守护循环在线（显式关闭 FD 7/8/9 并清理锁继承环境）
 start_singleton_watchdog() {
     if watchdog_alive; then
         return 0
@@ -1625,16 +1900,29 @@ start_singleton_watchdog() {
     elif command -v setsid >/dev/null 2>&1; then
         SETSID_CMD="setsid"
     fi
-    if [ -n "$BB_BIN" ] && "$BB_BIN" nsenter -t 1 -m -u -i -n -p -F "$TRUE_BIN" >/dev/null 2>&1; then
-        ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -u -i -n -p -F "$SH_BIN" "$SELF_SCRIPT" --watchdog ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
-    elif [ -n "$BB_BIN" ] && "$BB_BIN" nsenter -t 1 -m -n "$TRUE_BIN" >/dev/null 2>&1; then
-        ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -n "$SH_BIN" "$SELF_SCRIPT" --watchdog ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
-    elif command -v nsenter >/dev/null 2>&1 && nsenter -t 1 -m -n "$TRUE_BIN" >/dev/null 2>&1; then
-        ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -t 1 -m -n "$SH_BIN" "$SELF_SCRIPT" --watchdog ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
-    else
-        ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$SH_BIN" "$SELF_SCRIPT" --watchdog ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
+    NICE_CMD=""
+    if [ -n "$BB_BIN" ] && "$BB_BIN" nice -n 19 "$TRUE_BIN" >/dev/null 2>&1; then
+        NICE_CMD="$BB_BIN nice -n 19"
+    elif command -v nice >/dev/null 2>&1 && nice -n 19 "$TRUE_BIN" >/dev/null 2>&1; then
+        NICE_CMD="nice -n 19"
     fi
-    safe_sleep 0.1 || true
+    if [ -n "$BB_BIN" ] && "$BB_BIN" nsenter -t 1 -m -u -i -n -p -F "$TRUE_BIN" >/dev/null 2>&1; then
+        ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD $NICE_CMD "$BB_BIN" nsenter -t 1 -m -u -i -n -p -F "$SH_BIN" "$SELF_SCRIPT" --watchdog ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
+    elif [ -n "$BB_BIN" ] && "$BB_BIN" nsenter -t 1 -m -n "$TRUE_BIN" >/dev/null 2>&1; then
+        ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD $NICE_CMD "$BB_BIN" nsenter -t 1 -m -n "$SH_BIN" "$SELF_SCRIPT" --watchdog ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
+    elif command -v nsenter >/dev/null 2>&1 && nsenter -t 1 -m -n "$TRUE_BIN" >/dev/null 2>&1; then
+        ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD $NICE_CMD nsenter -t 1 -m -n "$SH_BIN" "$SELF_SCRIPT" --watchdog ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
+    else
+        ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD $NICE_CMD "$SH_BIN" "$SELF_SCRIPT" --watchdog ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
+    fi
+    _wd_wait=0
+    while [ "$_wd_wait" -lt 20 ]; do
+        if [ -s "$WATCHDOG_PID_FILE" ] && watchdog_alive; then
+            break
+        fi
+        safe_sleep 0.05 || sleep 1
+        _wd_wait=$((_wd_wait + 1))
+    done
 }
 
 # ==============================================================================
@@ -1960,40 +2248,99 @@ if [ "$1" = "--internal-start-and-mount-under-lock" ]; then
 fi
 
 # ==============================================================================
-# 子命令 1：独立后台单例巡检守护模式 (--watchdog)
-# 每 30 秒低功耗巡检一次，零 Wakelock，操作锁仅在需要恢复时短暂获取，休眠期间绝不持有操作锁
+# 子命令 1：独立后台单例「两级零功耗哨兵」守护模式 (--watchdog)
+# - 高频快速层（默认 60 秒/轮，零外部进程开销）：纯 Shell 检测 AGH_PID / NETD_PID / SYS_SERVER_PID 及 VPN 接口变化
+# - 软重启适配：sys.boot_completed=1 就绪门控防抢跑、同步关闭私人 DNS、一次性防余震复检
+# - 低频兜底层（默认 10 轮=10 分钟/轮轻量化规则与端口核验，20 轮=20 分钟/轮执行系统重维护）
+# - 统一失败退避与最低优先级 (nice 19)
 # ==============================================================================
 if [ "$1" = "--watchdog" ]; then
     unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID
     OP_LOCK_OWNED=0
     OP_LOCK_INHERITED=0
     escape_app_cgroup "$$"
+    if [ "${AGH_SKIP_RENICE:-0}" != "1" ]; then
+        renice -n 19 -p "$$" >/dev/null 2>&1 || \
+            renice 19 "$$" >/dev/null 2>&1 || \
+            { [ -n "$BB_BIN" ] && "$BB_BIN" renice 19 "$$" >/dev/null 2>&1; } || true
+    fi
     if ! acquire_watchdog_lock; then
         exit 0
     fi
 
-    vpn_last=$(detect_vpn_iface)
+    detect_vpn_iface_fast
+    vpn_last="$VPN_IFACE_STATE"
+    refresh_watchdog_cached_pids
+    boot_completed_cached=""
     cleaned_when_disabled=0
     watchdog_tick=0
     fail_streak=0
     backoff_remaining=0
-    WATCHDOG_INTERVAL="${AGH_WATCHDOG_INTERVAL:-30}"
+    last_failed_reason=""
+    soft_reboot_pending=0
+    soft_reboot_reason=""
+    soft_reboot_wait_loops=0
+    post_reboot_recheck=0
+    WATCHDOG_INTERVAL="${AGH_WATCHDOG_INTERVAL:-60}"
+    WATCHDOG_LOW_FREQ_TICKS="${AGH_WATCHDOG_LOW_FREQ_TICKS:-10}"
+    case "$WATCHDOG_LOW_FREQ_TICKS" in
+        ''|*[!0-9]*|0) WATCHDOG_LOW_FREQ_TICKS=10 ;;
+    esac
+    WATCHDOG_SOFT_REBOOT_POLL="${AGH_WATCHDOG_SOFT_REBOOT_POLL:-5}"
+    case "$WATCHDOG_SOFT_REBOOT_POLL" in
+        ''|*[!0-9]*|0) WATCHDOG_SOFT_REBOOT_POLL=5 ;;
+    esac
 
     while [ "$ABORTED_BY_SIGNAL" = "0" ]; do
-        safe_sleep "$WATCHDOG_INTERVAL" || exit 0
+        _wd_sleep="$WATCHDOG_INTERVAL"
+        if [ "$soft_reboot_pending" -eq 1 ]; then
+            case "$WATCHDOG_INTERVAL" in
+                ''|*[!0-9]*) ;;
+                *)
+                    if [ "$WATCHDOG_INTERVAL" -gt "$WATCHDOG_SOFT_REBOOT_POLL" ]; then
+                        _wd_sleep="$WATCHDOG_SOFT_REBOOT_POLL"
+                    fi
+                    ;;
+            esac
+        fi
+        safe_sleep "$_wd_sleep" || exit 0
         [ "$ABORTED_BY_SIGNAL" = "1" ] && break
         watchdog_tick=$((watchdog_tick + 1))
 
-        # 软重启过渡期间等待 Android 系统服务与 netd 初始化就绪
-        boot_ok=$(getprop sys.boot_completed 2>/dev/null)
-        [ -z "$boot_ok" ] || [ "$boot_ok" = "1" ] || continue
+        # 软重启/开机过渡期间等待 Android 系统服务就绪（已就绪后缓存在内存，稳态不再调用 getprop）
+        if [ "$boot_completed_cached" != "1" ]; then
+            boot_ok=$(getprop sys.boot_completed 2>/dev/null)
+            if [ -z "$boot_ok" ] || [ "$boot_ok" = "1" ]; then
+                boot_completed_cached="1"
+                if [ "$NETD_TRACKING_ACTIVE" -eq 0 ]; then
+                    resolve_netd_pid || true
+                fi
+                if [ "$SYS_SERVER_TRACKING_ACTIVE" -eq 0 ]; then
+                    resolve_sys_server_pid || true
+                fi
+            elif [ "$soft_reboot_pending" -eq 1 ]; then
+                soft_reboot_wait_loops=$((soft_reboot_wait_loops + 1))
+                if [ "$soft_reboot_wait_loops" -ge 12 ]; then
+                    boot_completed_cached="1"
+                else
+                    continue
+                fi
+            else
+                continue
+            fi
+        fi
 
         load_runtime_config
 
-        # 1. 严格尊重手动停止或模块禁用状态：绝不擅自重启核心或挂载规则
+        # 1. 严格尊重手动停止或模块禁用状态：纯 Shell 判定，绝不擅自重启核心或挂载规则
         if is_manually_stopped; then
             fail_streak=0
             backoff_remaining=0
+            last_failed_reason=""
+            soft_reboot_pending=0
+            soft_reboot_reason=""
+            soft_reboot_wait_loops=0
+            post_reboot_recheck=0
             if is_module_disabled && [ "$cleaned_when_disabled" -eq 0 ]; then
                 if acquire_op_lock 5; then
                     disarm_nat_safety_valve >/dev/null 2>&1 || true
@@ -2008,79 +2355,169 @@ if [ "$1" = "--watchdog" ]; then
         fi
         cleaned_when_disabled=0
 
-        # 1b. 防系统「私人 DNS」绕过；卸载残留目录 (*==deleted==) 拆分为每 20 轮 (~10 分钟) 低频维护一次
-        ensure_private_dns_off
-        if [ $((watchdog_tick % 20)) -eq 0 ]; then
-            clean_deleted_app_dirs
-        fi
-
-        # 2. 核心与端口健康检查：软重启后若核心仍健康则直接复用原进程（保留缓存与内存统计）
-        vpn_now=$(detect_vpn_iface)
-        core_ok=0
-        if agh_core_healthy "$redir_port"; then
-            core_ok=1
-            fail_streak=0
-            backoff_remaining=0
-        fi
-
-        if [ "$core_ok" -eq 0 ]; then
-            if [ "$backoff_remaining" -gt 0 ]; then
-                backoff_remaining=$((backoff_remaining - 1))
-                continue
-            fi
-            if acquire_op_lock 5; then
-                load_runtime_config
-                if is_manually_stopped; then
-                    release_op_lock
-                    continue
-                fi
-                if ! agh_core_healthy "$redir_port"; then
-                    disarm_nat_safety_valve >/dev/null 2>&1 || true
-                    log_msg "[WATCHDOG] 检测到 AdGuardHome 未运行或端口未完整监听，正在按当前模式恢复核心 (streak=$((fail_streak + 1)))..."
-                    if ensure_agh_started && remount_nat_rules "core-recovered"; then
-                        vpn_last="$vpn_now"
-                        fail_streak=0
-                        backoff_remaining=0
-                    else
-                        fail_streak=$((fail_streak + 1))
-                        case "$fail_streak" in
-                            1) backoff_remaining=0 ;;
-                            2) backoff_remaining=1 ;;
-                            3) backoff_remaining=3 ;;
-                            *) backoff_remaining=9 ;;
-                        esac
-                        log_msg "[WATCHDOG] 核心或防火墙恢复失败 (连续第 ${fail_streak} 次)，退避 $((backoff_remaining * 30)) 秒后重试"
-                    fi
-                fi
-                release_op_lock
-            fi
+        # 2. 统一失败退避门控：处于退避冷却期时直接跳过（零外部进程开销）
+        if [ "$backoff_remaining" -gt 0 ]; then
+            backoff_remaining=$((backoff_remaining - 1))
             continue
         fi
 
-        # 3. 核心健康时检查防火墙规则与 VPN 状态变化：正常运行时零重挂，仅在缺失或 VPN 变化时短暂加锁重挂
-        if [ "$vpn_now" != "$vpn_last" ]; then
-            if acquire_op_lock 5; then
-                if ! is_manually_stopped; then
-                    if remount_nat_rules "vpn-$vpn_now"; then
-                        vpn_last="$vpn_now"
-                    fi
-                fi
-                release_op_lock
+        need_repair=""
+
+        # 3. 高频快速层（每 60 秒一次，纯 Shell 内置判断，稳态禁止调用 ps/pgrep/pidof/iptables/getprop）
+        if ! is_agh_pid_alive_fast "$AGH_PID"; then
+            _wd_pf_pid=""
+            if [ -r "$PID_FILE" ]; then
+                IFS= read -r _wd_pf_pid < "$PID_FILE" 2>/dev/null || _wd_pf_pid=""
             fi
-        elif ! nat_rules_healthy; then
-            if acquire_op_lock 5; then
-                if ! is_manually_stopped && ! nat_rules_healthy; then
-                    if remount_nat_rules "nat-missing"; then
-                        vpn_last="$vpn_now"
-                    fi
-                fi
-                release_op_lock
+            if [ -n "$_wd_pf_pid" ] && [ "$_wd_pf_pid" != "$AGH_PID" ] && is_agh_pid_alive_fast "$_wd_pf_pid"; then
+                # 合法模式切换/手动重启更新了核心 PID，直接无感刷新缓存（若刚替换失败则由低频层兜底）
+                AGH_PID="$_wd_pf_pid"
+            else
+                need_repair="core-exited"
             fi
         fi
 
-        # 4. 仅当用户配置了非空 PROXY_URL 订阅链接时，执行单次同步
-        if [ -n "$PROXY_URL_CLEAN" ] && [ -f "$SCRIPT_DIR/ProxyConfig.sh" ]; then
-            AGH_OP_LOCK_HELD="" AGH_OP_LOCK_HOLDER_PID="" "$SH_BIN" "$SCRIPT_DIR/ProxyConfig.sh" --once </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&-
+        if [ -z "$need_repair" ] && [ "$NETD_TRACKING_ACTIVE" -eq 1 ]; then
+            if ! is_pid_alive_fast "$NETD_PID" "$NETD_COMM"; then
+                need_repair="netd-restarted"
+            fi
+        fi
+
+        if [ -z "$need_repair" ] && [ "$SYS_SERVER_TRACKING_ACTIVE" -eq 1 ]; then
+            if ! is_pid_alive_fast "$SYS_SERVER_PID" "$SYS_SERVER_COMM"; then
+                need_repair="soft-reboot"
+            fi
+        fi
+
+        detect_vpn_iface_fast
+        if [ -z "$need_repair" ] && [ "$VPN_IFACE_STATE" != "$vpn_last" ]; then
+            need_repair="vpn-$VPN_IFACE_STATE"
+        fi
+
+        if [ -z "$need_repair" ] && [ "$soft_reboot_pending" -eq 1 ]; then
+            need_repair="${soft_reboot_reason:-soft-reboot}"
+        fi
+
+        # 软重启就绪门控：捕获到 netd/system_server 重启时若系统尚在重启途中，等 sys.boot_completed=1 后再修，防止中途抢跑重挂被覆盖
+        if [ "$need_repair" = "netd-restarted" ] || [ "$need_repair" = "soft-reboot" ]; then
+            if [ "$soft_reboot_pending" -eq 0 ]; then
+                _sr_boot=$(getprop sys.boot_completed 2>/dev/null)
+                if [ -n "$_sr_boot" ] && [ "$_sr_boot" != "1" ]; then
+                    boot_completed_cached=""
+                    soft_reboot_pending=1
+                    soft_reboot_reason="$need_repair"
+                    soft_reboot_wait_loops=0
+                    continue
+                fi
+            fi
+            soft_reboot_pending=0
+            soft_reboot_reason=""
+            soft_reboot_wait_loops=0
+        fi
+
+        # 软重启恢复后的下一轮执行一次性防余震复检（防止 ConnectivityService 延迟完成覆写规则）
+        if [ -z "$need_repair" ] && [ "$post_reboot_recheck" -eq 1 ]; then
+            post_reboot_recheck=0
+            if ! agh_core_healthy "$redir_port"; then
+                need_repair="post-reboot-core-unhealthy"
+            elif ! nat_rules_healthy; then
+                need_repair="post-reboot-nat-missing"
+            fi
+        fi
+
+        # 若此前处于退避后的重试轮次且规则问题尚未确认恢复，主动触发一次轻量复检/修复
+        if [ -z "$need_repair" ] && [ "$fail_streak" -gt 0 ]; then
+            need_repair="${last_failed_reason:-backoff-retry}"
+        fi
+
+        # 4. 低频兜底层（默认 10 分钟执行一次轻量化规则与端口核验；系统重维护默认 20 分钟一次）
+        if [ -z "$need_repair" ] && [ $((watchdog_tick % WATCHDOG_LOW_FREQ_TICKS)) -eq 0 ]; then
+            WATCHDOG_MAINT_TICKS=$((WATCHDOG_LOW_FREQ_TICKS * 2))
+            if [ $((watchdog_tick % WATCHDOG_MAINT_TICKS)) -eq 0 ]; then
+                ensure_private_dns_off
+                clean_deleted_app_dirs
+                if [ -n "$PROXY_URL_CLEAN" ] && [ -f "$SCRIPT_DIR/ProxyConfig.sh" ]; then
+                    AGH_OP_LOCK_HELD="" AGH_OP_LOCK_HOLDER_PID="" "$SH_BIN" "$SCRIPT_DIR/ProxyConfig.sh" --once </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&-
+                fi
+            fi
+            if [ "$NETD_TRACKING_ACTIVE" -eq 0 ]; then
+                resolve_netd_pid || true
+            fi
+            if [ "$SYS_SERVER_TRACKING_ACTIVE" -eq 0 ]; then
+                resolve_sys_server_pid || true
+            fi
+            if ! agh_core_healthy "$redir_port"; then
+                need_repair="lowfreq-core-unhealthy"
+            elif ! nat_rules_healthy; then
+                need_repair="nat-missing"
+            else
+                fail_streak=0
+                backoff_remaining=0
+                last_failed_reason=""
+            fi
+        fi
+
+        # 5. 按需持锁修复与统一退避保护
+        if [ -n "$need_repair" ]; then
+            if acquire_op_lock 5; then
+                load_runtime_config
+                if is_manually_stopped; then
+                    fail_streak=0
+                    backoff_remaining=0
+                    last_failed_reason=""
+                    soft_reboot_pending=0
+                    soft_reboot_reason=""
+                    soft_reboot_wait_loops=0
+                    post_reboot_recheck=0
+                    release_op_lock
+                    continue
+                fi
+
+                ensure_private_dns_off
+                repair_ok=0
+                if agh_core_healthy "$redir_port"; then
+                    if { [ "$need_repair" = "core-exited" ] || [ "$need_repair" = "soft-reboot" ]; } && nat_rules_healthy; then
+                        repair_ok=1
+                    elif remount_nat_rules "$need_repair" && agh_core_healthy "$redir_port" && nat_rules_healthy; then
+                        repair_ok=1
+                    fi
+                else
+                    disarm_nat_safety_valve >/dev/null 2>&1 || true
+                    log_msg "[WATCHDOG] 检测到 AdGuardHome 未运行或端口未完整监听，正在按当前模式恢复核心 (reason=$need_repair, streak=$((fail_streak + 1)))..."
+                    if ensure_agh_started && remount_nat_rules "$need_repair" && agh_core_healthy "$redir_port" && nat_rules_healthy; then
+                        repair_ok=1
+                    fi
+                fi
+
+                refresh_watchdog_cached_pids
+                detect_vpn_iface_fast
+
+                if [ "$repair_ok" -eq 1 ]; then
+                    vpn_last="$VPN_IFACE_STATE"
+                    fail_streak=0
+                    backoff_remaining=0
+                    last_failed_reason=""
+                    if [ "$need_repair" = "soft-reboot" ] || [ "$need_repair" = "netd-restarted" ]; then
+                        post_reboot_recheck=1
+                    fi
+                else
+                    fail_streak=$((fail_streak + 1))
+                    last_failed_reason="$need_repair"
+                    case "$fail_streak" in
+                        1) backoff_remaining=1 ;;
+                        2) backoff_remaining=5 ;;
+                        3) backoff_remaining=10 ;;
+                        *) backoff_remaining=15 ;;
+                    esac
+                    _wd_backoff_ticks=$((backoff_remaining + 1))
+                    case "$WATCHDOG_INTERVAL" in
+                        ''|*[!0-9]*) _wd_backoff_str="${_wd_backoff_ticks} 轮(${WATCHDOG_INTERVAL}s/轮)" ;;
+                        *) _wd_backoff_str="$((_wd_backoff_ticks * WATCHDOG_INTERVAL)) 秒" ;;
+                    esac
+                    log_msg "[WATCHDOG] 核心或防火墙恢复失败 (reason=$need_repair, 连续第 ${fail_streak} 次)，退避 ${_wd_backoff_str}后重试"
+                fi
+                release_op_lock
+            fi
         fi
     done
     exit 0

@@ -24,7 +24,7 @@ jobs:
         run: |
           case "${GITHUB_REF_NAME:-}" in
             v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
-            *)  VERSION_TAG="v20261117.3" ;;
+            *)  VERSION_TAG="v20261123.1-rc.1" ;;
           esac
           VERSION_DATE="${VERSION_TAG#v}"
           case "$VERSION_TAG" in
@@ -54,20 +54,17 @@ jobs:
           prerelease: ${{ env.IS_PRERELEASE == 'true' }}
           make_latest: ${{ env.MAKE_LATEST }}
           body: |
-            ### AdGuard Home GoGoGo `${{ env.VERSION_TAG }}`
+            ### AdGuard Home GoGoGo `${{ env.VERSION_TAG }}` (Pre-release / Watchdog 低功耗与软重启适配候选版)
 
-            基于 `v20261117.2` 基线发布正式版，内置 **[AdGuard-Home-GoGoGo-Core v2026-11-16-rc.3](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core)** 与 **[AdGuard-Home-GoGoGo-Manager v2.24.28](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager)**：
+            基于 `v20261117.3` 正式版发布候选测试版，内置 **[AdGuard-Home-GoGoGo-Core v2026-11-16-rc.3](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core)** 与 **[AdGuard-Home-GoGoGo-Manager v2.24.28](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager)**：
 
-            > ⚠️ **验证与实机状态说明**：Core 二进制（`c5e38874ab9a413b5f5e668301058e46ed1e258ce83dc73c380c79d529201f3a`）与模块脚本未变更；Manager 静态分析（`flutter analyze --no-fatal-infos`）、51 项单元与 Widget 测试、APK 签名及刷机包体核验已通过。本端环境未连接实机（`adb devices -l` 为空），自候选版以来的真机视觉与端到端交互验收尚未在实机执行。
+            > ⚠️ **验证与实机状态说明**：Core 二进制（`c5e38874ab9a413b5f5e668301058e46ed1e258ce83dc73c380c79d529201f3a`）、Manager APK（`90578f70318934936a868dccf5a606cba54245d98625133ad59d1c85024a3c32`）与默认规则/过滤订阅均未变更；模块脚本已完成 `/bin/sh -n`、`/bin/ksh -n` 语法校验及沙盒回归套件（`TEST 1`–`TEST 10`，含 `10A`–`10G` 软重启门控、余震复检、零命令快速层与僵尸进程拦截）。当前尚未在真机连续挂机验证耗电与软重启实景日志，作为候选版发布以供刷入实测，暂不覆盖 `v20261117.3` Latest 稳定版。
 
-            #### 本次调整说明（Manager 日志列表紧凑布局）
-            - **删除独立展开箭头列与空占位**：普通行与聚合行统一采用紧凑状态列，彻底消除由于箭头列存在引起的视觉不对齐与空白占位冗余。
-            - **重复次数移至右侧状态区**：当且仅当重复次数 > 1 时在状态文字下方展示 `×N`（超过万次时自动精简为 `×10k`），不撑宽卡片，且为读屏提供完整无障碍语义支持（“已放行，重复 8 次” / “Processed, repeated 8 times”）。
-            - **重新分配第二行左侧空间**：移除原有的“重复 N 次”副标题文本，为协议标签、时间与规则来源/规则摘要（`· 规则摘要`）释放充足横向空间，超长时安全截断且在 300dp 极窄屏幕与 1.8x 大字号下无任何 RenderFlex 溢出。
-            - **交互行为与过滤策略保持不变**：点击整行继续弹出完整详情对话框，Core 二进制、过滤规则、订阅及网络策略完全保持不变。
-
-            #### 升级提示
-            - 若已刷入 `v20261117.1` 或 `v20261117.2` 模块，仅需直接覆盖安装新版 Manager APK（`2.24.28+197`）即可生效，无需重刷模块或重启 Core。
+            #### 本次更新内容（`service.sh --watchdog` 低功耗重构 & `iptables.sh` 兼容修复）
+            - **两级零功耗哨兵架构**：`--watchdog` 以 `nice 19` 最低优先级运行；60 秒高频快速层仅通过纯 Shell 内置读取 `/proc/<pid>` 与 `/sys/class/net` 检测 `AdGuardHome`、`netd`、`system_server` 及 VPN 接口变化（稳态零外部进程 `fork`），拦截 `State: Z/X` 僵尸/死亡态及 PID 复用；10 分钟低频层执行规则与端口核验，20 分钟执行一次 `ensure_private_dns_off`（`settings get`）/ 残留清理 / `ProxyConfig.sh --once`。
+            - **Root 软重启完整适配**：快速层监控 `system_server` 与 `netd` 进程变化；捕获软重启后先校验并等待 `sys.boot_completed=1`（期间切为 5 秒轻轮询防抢跑），就绪后同步关停私人 DNS、无损复用健康核心、按需重挂规则，并自动安排 1 轮一次性防余震复检应对 `ConnectivityService` 延迟洗表。
+            - **最小 `iptables` 核验与统一退避**：`nat_rules_healthy()` 改为主链 `-C` + 自有小链（`ADGUARD` / `ADGUARD6_NAT` / `AGH_SNI`）单链 `-S` 纯 Shell `case` 解析（单次核验降至 6~8 次进程调用、0 个 `grep`，补齐 `--gid-owner 23333` 防环回校验）；`iptables.sh` 的 `post_apply_check()` 兼容 `queue_num=0` 被内核省略 `--queue-num 0` 的默认输出；核心与防火墙修复失败共享统一递增退避策略。
+            - **启动期优先级与单实例收敛**：`spawn_agh_in_root_ns()` 通过 `reset_spawn_priority()` 恢复核心 `nice 0`，避免受守护进程 `nice 19` 继承影响；`start_singleton_watchdog()` 改为有界等待守护锁就绪。
           files: |
             releases/AdGuard_Home_gogogo_${{ env.VERSION_DATE }}.zip
             releases/AdGuardHomeManager.apk

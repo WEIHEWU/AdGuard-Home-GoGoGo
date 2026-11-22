@@ -90,6 +90,7 @@ OP_PID_FILE="$OP_LOCK_DIAG_PID_FILE"
 SESSION_STOP_FILE="$(resolve_abs_path "$RUN_DIR/agh_manual_stop")"
 IPV6_DNS_MODE_FILE="$(resolve_abs_path "$RUN_DIR/agh_ipv6_dns_mode")"
 SNI_FW_MODE_FILE="$(resolve_abs_path "$RUN_DIR/agh_sni_fw_mode")"
+SNI_QUEUE_NUM_FILE="$(resolve_abs_path "$RUN_DIR/agh_sni_queue_num")"
 
 if [ -f "$SCRIPT_DIR/diag_log.sh" ]; then
     . "$SCRIPT_DIR/diag_log.sh"
@@ -936,6 +937,7 @@ rebuild_sni() {
     clean_sni_rules
     if [ "$ENABLE_SNI" = "0" ]; then
         echo "disabled" > "$SNI_FW_MODE_FILE" 2>/dev/null
+        rm -f "$SNI_QUEUE_NUM_FILE" 2>/dev/null
         return 0
     fi
 
@@ -981,6 +983,7 @@ rebuild_sni() {
         # 内核完全不支持 IPv4 mangle NFQUEUE：作为可选能力按 unsupported 处理
         clean_sni_rules
         echo "unsupported" > "$SNI_FW_MODE_FILE" 2>/dev/null
+        rm -f "$SNI_QUEUE_NUM_FILE" 2>/dev/null
         return 0
     fi
     if [ "$v4_ports_fail" -ne 0 ] || [ "$v4_sni_gid_ok" -ne 1 ]; then
@@ -1000,6 +1003,7 @@ rebuild_sni() {
         return 1
     fi
     echo "$v4_sni_mode" > "$SNI_FW_MODE_FILE" 2>/dev/null
+    printf '%s\n' "$sni_queue" > "$SNI_QUEUE_NUM_FILE" 2>/dev/null
 
     # --- IPv6 mangle 表 AGH_SNI 链配置（仅当内核支持 mangle AGH_SNI 时执行规则注入） ---
     ip6tables -w 2 -t mangle -N AGH_SNI 2>/dev/null
@@ -1345,7 +1349,12 @@ post_apply_check() {
             for chk_sni_port in 443 8443; do
                 port_rule=$(printf '%s\n' "$sni_chain" | grep -E -- "^-A AGH_SNI -p tcp .*--dport ${chk_sni_port}([[:space:]]|\$)" | grep -E -- "-j NFQUEUE([[:space:]]|\$)" | head -n 1)
                 [ -n "$port_rule" ] || return 1
-                printf '%s\n' "$port_rule" | grep -qE -- "--queue-num ${exp_sni_queue}([[:space:]]|\$)" || return 1
+                if [ "$exp_sni_queue" = "0" ]; then
+                    # queue_num=0 为 NFQUEUE 默认队列，Linux/Android iptables -S 默认省略 --queue-num 0；仅需确保未挂载到非 0 队列
+                    printf '%s\n' "$port_rule" | grep -qE -- "--queue-num [1-9][0-9]*" && return 1
+                else
+                    printf '%s\n' "$port_rule" | grep -qE -- "--queue-num ${exp_sni_queue}([[:space:]]|\$)" || return 1
+                fi
                 printf '%s\n' "$port_rule" | grep -qE -- "--queue-bypass([[:space:]]|\$)" || return 1
                 if [ "$sni_mode" = "connbytes" ]; then
                     printf '%s\n' "$port_rule" | grep -q -- "connbytes" || return 1
@@ -1392,7 +1401,7 @@ clean_all_rules() {
     ip6tables -w 2 -t filter -X ADGUARD_DOT 2>/dev/null
     clean_sni_rules
     clean_hotspot_rules
-    rm -f "$AGH_DIR/app_pause_active" "$AGH_DIR/vpn_mode_status" "$IPV6_DNS_MODE_FILE" "$SNI_FW_MODE_FILE" 2>/dev/null
+    rm -f "$AGH_DIR/app_pause_active" "$AGH_DIR/vpn_mode_status" "$IPV6_DNS_MODE_FILE" "$SNI_FW_MODE_FILE" "$SNI_QUEUE_NUM_FILE" 2>/dev/null
 
     cleanup_err=0
     iptables -w 2 -t nat -C OUTPUT -j ADGUARD >/dev/null 2>&1 && cleanup_err=1
