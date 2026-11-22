@@ -71,42 +71,80 @@ mkdir -p "$MODPATH" || fail_install "Failed to create MODPATH" "创建模块目�
 unzip -q -o "$ZIPFILE" uninstall.sh module.prop service.sh action.sh AdGuardHomeManager.apk -d "$MODPATH" || \
   fail_install "Failed to extract basic module files" "解压模块基本文件失败"
 
-# 检查并停止运行中的进程（含守护进程）
+# 检查并停止运行中的进程（按 PID 校验 / pidof / pgrep 精准定位，禁止全 /proc 遍历调用 tr 触发上千次 fork 阻塞）
 if [ -d "$AGH_DIR" ]; then
   i18n_print "- Stopping AdGuardHome and its additional processes" "- 正在终止AdGuardHome及附加进程"
-  for pid_f in /dev/shm/agh_watchdog.pid "$AGH_DIR/run/agh_watchdog.pid" \
-               /dev/shm/agh_watchdog.lock/pid "$AGH_DIR/run/agh_watchdog.lock/pid"; do
-    if [ -f "$pid_f" ]; then
-      old_wd=$(cat "$pid_f" 2>/dev/null || true)
-      if [ -n "$old_wd" ]; then
-        kill -9 "$old_wd" 2>/dev/null || true
-      fi
-      rm -f "$pid_f" 2>/dev/null || true
+  collect_agh_target_pids() {
+    _cap_pids=""
+    if [ -r "$BIN_DIR/AdGuardHome.pid" ]; then
+      IFS= read -r _cap_p < "$BIN_DIR/AdGuardHome.pid" 2>/dev/null || _cap_p=""
+      case "$_cap_p" in
+        ''|*[!0-9]*) ;;
+        *)
+          if [ ! -d /proc ] || { [ -r "/proc/$_cap_p/comm" ] && IFS= read -r _cap_c < "/proc/$_cap_p/comm" 2>/dev/null && [ "$_cap_c" = "AdGuardHome" ]; }; then
+            _cap_pids="$_cap_pids $_cap_p"
+          fi
+          ;;
+      esac
     fi
-  done
-  rm -rf /dev/shm/agh_watchdog.lock /dev/shm/agh_op.lock /dev/shm/agh_manual_stop \
-         "$AGH_DIR/run/agh_watchdog.lock" "$AGH_DIR/run/agh_op.lock" "$AGH_DIR/run/agh_manual_stop" 2>/dev/null || true
-  pkill -f "/AdGuardHome/service.sh.*--watchdog" 2>/dev/null || true
-  stop_loops=0
-  while [ "$stop_loops" -lt 10 ]; do
-    found=0
-    for p in /proc/[0-9]*; do
-      [ -r "$p/cmdline" ] || continue
-      cmd=$(tr '\000' ' ' < "$p/cmdline" 2>/dev/null || true)
-      case "$cmd" in
-        *"$AGH_DIR/bin/AdGuardHome"*|*"$AGH_DIR/scripts/"*|*"/AdGuardHome/service.sh"*"--watchdog"*)
-          target_p="${p#/proc/}"
-          if [ "$target_p" != "$$" ]; then
-            kill -9 "$target_p" 2>/dev/null || true
-            found=1
+    for pid_f in /dev/shm/agh_watchdog.pid "$AGH_DIR/run/agh_watchdog.pid" \
+                 /dev/shm/agh_watchdog.lock/pid "$AGH_DIR/run/agh_watchdog.lock/pid"; do
+      [ -r "$pid_f" ] || continue
+      IFS= read -r _cap_p < "$pid_f" 2>/dev/null || _cap_p=""
+      case "$_cap_p" in
+        ''|*[!0-9]*) ;;
+        *)
+          if [ ! -d /proc ]; then
+            _cap_pids="$_cap_pids $_cap_p"
+          elif [ -r "/proc/$_cap_p/comm" ]; then
+            IFS= read -r _cap_c < "/proc/$_cap_p/comm" 2>/dev/null || _cap_c=""
+            case "$_cap_c" in
+              sh|mksh|ash|ksh|dash|bash|busybox|service.sh) _cap_pids="$_cap_pids $_cap_p" ;;
+            esac
           fi
           ;;
       esac
     done
-    [ "$found" -eq 0 ] && break
-    sleep 1
+    if command -v pidof >/dev/null 2>&1; then
+      for _cap_p in $(pidof AdGuardHome 2>/dev/null); do
+        case "$_cap_p" in
+          ''|*[!0-9]*) ;;
+          *) _cap_pids="$_cap_pids $_cap_p" ;;
+        esac
+      done
+    fi
+    if command -v pgrep >/dev/null 2>&1; then
+      for _cap_pat in "$BIN_DIR/AdGuardHome" "$AGH_DIR/scripts/" "/AdGuardHome/service.sh.*--watchdog"; do
+        for _cap_p in $(pgrep -f "$_cap_pat" 2>/dev/null); do
+          case "$_cap_p" in
+            ''|*[!0-9]*) ;;
+            *) _cap_pids="$_cap_pids $_cap_p" ;;
+          esac
+        done
+      done
+    fi
+  }
+
+  _parent_pid="${PPID:-0}"
+  stop_loops=0
+  while [ "$stop_loops" -lt 8 ]; do
+    collect_agh_target_pids
+    _killed_any=0
+    for target_p in $_cap_pids; do
+      [ "$target_p" != "$$" ] && [ "$target_p" != "$_parent_pid" ] || continue
+      if kill -0 "$target_p" 2>/dev/null; then
+        kill -9 "$target_p" 2>/dev/null || true
+        _killed_any=1
+      fi
+    done
+    [ "$_killed_any" -eq 0 ] && break
+    sleep 0.1 2>/dev/null || sleep 1
     stop_loops=$((stop_loops + 1))
   done
+
+  rm -rf /dev/shm/agh_watchdog.pid /dev/shm/agh_watchdog.lock /dev/shm/agh_op.lock /dev/shm/agh_manual_stop \
+         "$AGH_DIR/run/agh_watchdog.pid" "$AGH_DIR/run/agh_watchdog.lock" "$AGH_DIR/run/agh_op.lock" "$AGH_DIR/run/agh_manual_stop" \
+         "$BIN_DIR/AdGuardHome.pid" 2>/dev/null || true
 fi
 
 # 轻量结构校验（零子进程开销，先快速拦截明显损坏或空 YAML，核心二进制校验延后至新核心就位后仅执行一次）
