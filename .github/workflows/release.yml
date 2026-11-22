@@ -24,7 +24,7 @@ jobs:
         run: |
           case "${GITHUB_REF_NAME:-}" in
             v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
-            *)  VERSION_TAG="v20261123.1-rc.1" ;;
+            *)  VERSION_TAG="v20261123.1-rc.2" ;;
           esac
           VERSION_DATE="${VERSION_TAG#v}"
           case "$VERSION_TAG" in
@@ -60,7 +60,8 @@ jobs:
 
             > ⚠️ **验证与实机状态说明**：Core 二进制（`c5e38874ab9a413b5f5e668301058e46ed1e258ce83dc73c380c79d529201f3a`）、Manager APK（`90578f70318934936a868dccf5a606cba54245d98625133ad59d1c85024a3c32`）与默认规则/过滤订阅均未变更；模块脚本已完成 `/bin/sh -n`、`/bin/ksh -n` 语法校验及沙盒回归套件（`TEST 1`–`TEST 10`，含 `10A`–`10G` 软重启门控、余震复检、零命令快速层与僵尸进程拦截）。当前尚未在真机连续挂机验证耗电与软重启实景日志，作为候选版发布以供刷入实测，暂不覆盖 `v20261117.3` Latest 稳定版。
 
-            #### 本次更新内容（`service.sh --watchdog` 低功耗重构 & `iptables.sh` 兼容修复）
+            #### 本次更新内容（`customize.sh` 升级加速 + `service.sh --watchdog` 低功耗重构 & 软重启适配）
+            - **升级刷入极速优化（`customize.sh`，不降级安全性）**：升级路径跳过包内自带默认规则解压；订阅目录 `/data/adb/agh/bin/data/filters` 原地保留（只做单向备份并记录清单，取消二次全量回写及双倍 `cmp` 字节重读）；同分区核心与脚本改用 `mv -f` 原子替换；合并为新核心单次 `--check-config` 兼容性校验并合包一次性解压基本文件。
             - **两级零功耗哨兵架构**：`--watchdog` 以 `nice 19` 最低优先级运行；60 秒高频快速层仅通过纯 Shell 内置读取 `/proc/<pid>` 与 `/sys/class/net` 检测 `AdGuardHome`、`netd`、`system_server` 及 VPN 接口变化（稳态零外部进程 `fork`），拦截 `State: Z/X` 僵尸/死亡态及 PID 复用；10 分钟低频层执行规则与端口核验，20 分钟执行一次 `ensure_private_dns_off`（`settings get`）/ 残留清理 / `ProxyConfig.sh --once`。
             - **Root 软重启完整适配**：快速层监控 `system_server` 与 `netd` 进程变化；捕获软重启后先校验并等待 `sys.boot_completed=1`（期间切为 5 秒轻轮询防抢跑），就绪后同步关停私人 DNS、无损复用健康核心、按需重挂规则，并自动安排 1 轮一次性防余震复检应对 `ConnectivityService` 延迟洗表。
             - **最小 `iptables` 核验与统一退避**：`nat_rules_healthy()` 改为主链 `-C` + 自有小链（`ADGUARD` / `ADGUARD6_NAT` / `AGH_SNI`）单链 `-S` 纯 Shell `case` 解析（单次核验降至 6~8 次进程调用、0 个 `grep`，补齐 `--gid-owner 23333` 防环回校验）；`iptables.sh` 的 `post_apply_check()` 兼容 `queue_num=0` 被内核省略 `--queue-num 0` 的默认输出；核心与防火墙修复失败共享统一递增退避策略。

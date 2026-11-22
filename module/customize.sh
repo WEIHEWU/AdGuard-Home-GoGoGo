@@ -68,9 +68,8 @@ fi
 
 i18n_print "- Extracting basic module files" "- 正在解压模块基本文件"
 mkdir -p "$MODPATH" || fail_install "Failed to create MODPATH" "创建模块目录失败"
-for file in uninstall.sh module.prop service.sh action.sh AdGuardHomeManager.apk; do
-  unzip -q -o "$ZIPFILE" "$file" -d "$MODPATH" || fail_install "Failed to extract $file" "解压 $file 失败"
-done
+unzip -q -o "$ZIPFILE" uninstall.sh module.prop service.sh action.sh AdGuardHomeManager.apk -d "$MODPATH" || \
+  fail_install "Failed to extract basic module files" "解压模块基本文件失败"
 
 # 检查并停止运行中的进程（含守护进程）
 if [ -d "$AGH_DIR" ]; then
@@ -110,14 +109,21 @@ if [ -d "$AGH_DIR" ]; then
   done
 fi
 
-# 校验 YAML 基础结构与核心 --check-config（若核心可在当前环境直接执行）
-validate_yaml_candidate() {
+# 轻量结构校验（零子进程开销，先快速拦截明显损坏或空 YAML，核心二进制校验延后至新核心就位后仅执行一次）
+validate_yaml_structure() {
   vf="$1"
-  check_bin="${2:-$BIN_DIR/AdGuardHome}"
   [ -s "$vf" ] || return 1
   grep -q '^schema_version:' "$vf" 2>/dev/null || return 1
   grep -q '^dns:' "$vf" 2>/dev/null || return 1
   grep -q '^user_rules:' "$vf" 2>/dev/null || return 1
+  return 0
+}
+
+# 使用目标核心校验 YAML 兼容性（若当前执行环境可执行该架构二进制）
+validate_yaml_with_bin() {
+  vf="$1"
+  check_bin="${2:-$BIN_DIR/AdGuardHome}"
+  validate_yaml_structure "$vf" || return 1
   if [ -x "$check_bin" ]; then
     if "$check_bin" --version >/dev/null 2>&1; then
       "$check_bin" --check-config -c "$vf" -w "${vf%/*}" >/dev/null 2>&1 || return 1
@@ -135,6 +141,26 @@ copy_and_verify_file() {
   return 0
 }
 
+# 用于大体积订阅规则单向备份的轻量校验（避免逐字节全量二次读取回比）
+copy_backup_fast() {
+  src_f="$1"
+  dst_f="$2"
+  cp -pf "$src_f" "$dst_f" 2>/dev/null || cp -f "$src_f" "$dst_f" 2>/dev/null || return 1
+  [ -f "$dst_f" ] || return 1
+  if [ -s "$src_f" ] && [ ! -s "$dst_f" ]; then
+    return 1
+  fi
+  return 0
+}
+
+# 同分区优先 O(1) 原子重命名移动，跨设备时回退至安全拷贝校验
+move_or_copy_file() {
+  src_f="$1"
+  dst_f="$2"
+  mv -f "$src_f" "$dst_f" 2>/dev/null && return 0
+  copy_and_verify_file "$src_f" "$dst_f"
+}
+
 # 判定首次安装 vs 已有安装升级
 IS_UPGRADE=0
 if [ -d "$AGH_DIR" ] && { [ -e "$BIN_DIR/AdGuardHome.yaml" ] || [ -e "$BIN_DIR/AdGuardHome.yaml.bak" ] || [ -d "$BIN_DIR/data/filters" ] || [ -f "$SCRIPT_DIR/config.prop" ]; }; then
@@ -144,7 +170,7 @@ fi
 # 解锁旧脚本防篡改保护（仅在确认备份完成后才会修改任何运行文件）
 if [ -d "$SCRIPT_DIR" ]; then
   i18n_print "- Unlocking old script files" "- 正在解锁旧脚本文件"
-  find "$AGH_DIR/scripts" "$ADGPATH" -type f -name "*.sh" -exec chattr -i {} \; 2>/dev/null
+  find "$AGH_DIR/scripts" "$ADGPATH" -type f -name "*.sh" -exec chattr -i {} + 2>/dev/null || true
 fi
 
 if [ "$IS_UPGRADE" -eq 1 ]; then
@@ -192,37 +218,39 @@ if [ "$IS_UPGRADE" -eq 1 ]; then
     done
   fi
 
-  # 3. 完整备份当前设备侧订阅规则文件集合并记录清单
+  # 3. 单向备份当前设备侧订阅规则文件集合并记录清单（升级阶段绝不覆盖原 filters 目录，无需二次回写比对）
   : > "$UPGRADE_BACKUP_DIR/filters.manifest" || \
     fail_install "Failed to create filters manifest" "创建订阅备份清单失败"
   if [ -d "$BIN_DIR/data/filters" ]; then
     for ff in "$BIN_DIR/data/filters/"*; do
       [ -f "$ff" ] || continue
       fname="${ff##*/}"
-      copy_and_verify_file "$ff" "$UPGRADE_BACKUP_DIR/filters/$fname" || \
+      copy_backup_fast "$ff" "$UPGRADE_BACKUP_DIR/filters/$fname" || \
         fail_install "Failed to back up filter file $fname" "备份订阅文件 $fname 失败"
       printf '%s\n' "$fname" >> "$UPGRADE_BACKUP_DIR/filters.manifest" || \
         fail_install "Failed to record filter manifest for $fname" "写入订阅清单 $fname 失败"
     done
   fi
 
-  # 4. 校验已有安装的配置有效性：若已有配置与备份均损坏，不得静默当成首次安装覆盖！
-  RESTORE_YAML=""
-  if [ -f "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml" ] && validate_yaml_candidate "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml"; then
-    RESTORE_YAML="$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml"
-  elif [ -f "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml.bak" ] && validate_yaml_candidate "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml.bak"; then
-    RESTORE_YAML="$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml.bak"
-    i18n_print "- Primary YAML invalid; using verified .bak from current install" "- 主配置无效，使用当前安装已验证的 .bak 备份"
-  else
+  # 4. 快速结构预检：提前拦截完全缺失/空配置，避免无效解压
+  HAS_STRUCT_YAML=0
+  if [ -f "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml" ] && validate_yaml_structure "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml"; then
+    HAS_STRUCT_YAML=1
+  elif [ -f "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml.bak" ] && validate_yaml_structure "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml.bak"; then
+    HAS_STRUCT_YAML=1
+  fi
+  if [ "$HAS_STRUCT_YAML" -ne 1 ]; then
     fail_install "Existing AdGuardHome.yaml is missing or corrupted in upgrade path (refusing to overwrite with factory template)" "升级路径下现有 AdGuardHome.yaml 损坏且无有效 .bak（拒绝静默重置为出厂模板）"
   fi
 
-  # 5. 先解压安装包内容至独立暂存目录，不直接覆盖运行目录
+  # 5. 仅解压升级所需的脚本、核心与模式模板至同分区暂存目录（跳过包内自带 bin/data/filters/*，零多余 I/O）
+  i18n_print "- Extracting updated binary and scripts" "- 正在解压新版程序与运行脚本"
   STAGE_DIR="$AGH_DIR/.stage_upgrade_${UPGRADE_TS}"
   rm -rf "$STAGE_DIR" 2>/dev/null
   mkdir -p "$STAGE_DIR" || fail_install "Failed to create staging directory" "创建升级暂存目录失败"
-  if ! unzip -q -o "$ZIPFILE" "scripts/*" -d "$STAGE_DIR" || \
-     ! unzip -q -o "$ZIPFILE" "bin/*" -d "$STAGE_DIR"; then
+  if ! unzip -q -o "$ZIPFILE" "scripts/*" \
+         "bin/AdGuardHome" "bin/AdGuardHome_overseas.yaml" "bin/AdGuardHome_cn.yaml" "bin/default_user_rules.txt" \
+         -d "$STAGE_DIR"; then
     rm -rf "$STAGE_DIR" 2>/dev/null
     fail_install "Failed to extract package files to staging directory" "解压升级包到暂存目录失败"
   fi
@@ -243,13 +271,21 @@ if [ "$IS_UPGRADE" -eq 1 ]; then
     fi
   done
 
-  # 使用新核心再次验证待保留的用户配置兼容性
-  if ! validate_yaml_candidate "$RESTORE_YAML" "$STAGE_DIR/bin/AdGuardHome"; then
+  # 使用新核心一次性校验现有主配置（或 .bak 备选）的兼容性
+  i18n_print "- Validating existing configuration against updated core" "- 正在校验现有配置与新核心兼容性"
+  RESTORE_YAML=""
+  if [ -f "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml" ] && validate_yaml_with_bin "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml" "$STAGE_DIR/bin/AdGuardHome"; then
+    RESTORE_YAML="$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml"
+  elif [ -f "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml.bak" ] && validate_yaml_with_bin "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml.bak" "$STAGE_DIR/bin/AdGuardHome"; then
+    RESTORE_YAML="$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml.bak"
+    i18n_print "- Primary YAML invalid; using verified .bak from current install" "- 主配置无效，使用当前安装已验证的 .bak 备份"
+  else
     rm -rf "$STAGE_DIR" 2>/dev/null
     fail_install "Existing configuration failed validation against new AdGuardHome binary" "现有配置未通过新核心兼容性校验"
   fi
 
-  # 6. 仅更新程序文件、脚本与模式参考模板，跳过用户配置与规则目录覆盖
+  # 6. 同分区直接原子移动替换程序文件、脚本与模式参考模板，跳过用户配置与规则目录
+  i18n_print "- Updating binary and scripts (preserving configs and filters)" "- 正在更新核心与脚本（保留现有配置与订阅）"
   mkdir -p "$BIN_DIR" "$SCRIPT_DIR" "$BIN_DIR/data/filters" || {
     rm -rf "$STAGE_DIR" 2>/dev/null
     fail_install "Failed to prepare runtime directories" "准备运行目录失败"
@@ -257,7 +293,7 @@ if [ "$IS_UPGRADE" -eq 1 ]; then
 
   for bin_item in AdGuardHome AdGuardHome_overseas.yaml AdGuardHome_cn.yaml default_user_rules.txt cacerts.pem; do
     if [ -f "$STAGE_DIR/bin/$bin_item" ]; then
-      if ! copy_and_verify_file "$STAGE_DIR/bin/$bin_item" "$BIN_DIR/$bin_item"; then
+      if ! move_or_copy_file "$STAGE_DIR/bin/$bin_item" "$BIN_DIR/$bin_item"; then
         rm -rf "$STAGE_DIR" 2>/dev/null
         fail_install "Failed to update binary/template $bin_item" "更新程序文件 $bin_item 失败"
       fi
@@ -267,7 +303,7 @@ if [ "$IS_UPGRADE" -eq 1 ]; then
   for sh_file in "$STAGE_DIR/scripts/"*.sh; do
     [ -f "$sh_file" ] || continue
     sh_name="${sh_file##*/}"
-    if ! copy_and_verify_file "$sh_file" "$SCRIPT_DIR/$sh_name"; then
+    if ! move_or_copy_file "$sh_file" "$SCRIPT_DIR/$sh_name"; then
       rm -rf "$STAGE_DIR" 2>/dev/null
       fail_install "Failed to update script $sh_name" "更新脚本 $sh_name 失败"
     fi
@@ -308,38 +344,35 @@ if [ "$IS_UPGRADE" -eq 1 ]; then
       fi
     done
   fi
-  if ! copy_and_verify_file "$STAGE_PROP" "$SCRIPT_DIR/config.prop"; then
+  if ! move_or_copy_file "$STAGE_PROP" "$SCRIPT_DIR/config.prop"; then
     rm -rf "$STAGE_DIR" 2>/dev/null
     fail_install "Failed to write merged config.prop" "写入合并后的 config.prop 失败"
   fi
 
-  # 7. 确保运行配置与升级前完全一致（不调用 switch_mode.sh 重写，不把配置强制同步为模板）
-  if ! copy_and_verify_file "$RESTORE_YAML" "$BIN_DIR/AdGuardHome.yaml" || \
-     ! copy_and_verify_file "$RESTORE_YAML" "$BIN_DIR/AdGuardHome.yaml.bak"; then
+  # 7. 若运行 YAML 来自 .bak 降级或不存在则补回，并确保 .yaml.bak 与当前配置一致
+  if [ "$RESTORE_YAML" != "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml" ] || [ ! -f "$BIN_DIR/AdGuardHome.yaml" ]; then
+    if ! copy_and_verify_file "$RESTORE_YAML" "$BIN_DIR/AdGuardHome.yaml"; then
+      rm -rf "$STAGE_DIR" 2>/dev/null
+      fail_install "Failed to preserve AdGuardHome.yaml" "恢复并校验 AdGuardHome.yaml 失败"
+    fi
+  fi
+  if ! copy_and_verify_file "$RESTORE_YAML" "$BIN_DIR/AdGuardHome.yaml.bak"; then
     rm -rf "$STAGE_DIR" 2>/dev/null
-    fail_install "Failed to preserve AdGuardHome.yaml" "恢复并校验 AdGuardHome.yaml 失败"
+    fail_install "Failed to preserve AdGuardHome.yaml.bak" "恢复并校验 AdGuardHome.yaml.bak 失败"
   fi
 
-  # 8. 确保订阅文件集合与升级前设备侧 100% 一致（精确按本次升级前清单对齐，不塞回已删默认文件，不覆盖同名已改文件）
-  rm -rf "$BIN_DIR/data/filters.rebuild.$$" 2>/dev/null || true
-  mkdir -p "$BIN_DIR/data/filters.rebuild.$$" || {
-    rm -rf "$STAGE_DIR" 2>/dev/null
-    fail_install "Failed to create filter verification directory" "创建订阅校验目录失败"
-  }
+  # 8. 原地核对订阅规则清单（原 filters 目录未受触动，仅当意外缺失某项时从本次备份单文件补齐）
   while IFS= read -r manifest_fname || [ -n "$manifest_fname" ]; do
     [ -n "$manifest_fname" ] || continue
-    if ! copy_and_verify_file "$UPGRADE_BACKUP_DIR/filters/$manifest_fname" "$BIN_DIR/data/filters.rebuild.$$/$manifest_fname"; then
-      rm -rf "$BIN_DIR/data/filters.rebuild.$$" "$STAGE_DIR" 2>/dev/null
-      fail_install "Failed to restore filter $manifest_fname from dedicated backup" "从专属备份还原订阅 $manifest_fname 失败"
+    if [ ! -f "$BIN_DIR/data/filters/$manifest_fname" ]; then
+      if ! copy_and_verify_file "$UPGRADE_BACKUP_DIR/filters/$manifest_fname" "$BIN_DIR/data/filters/$manifest_fname"; then
+        rm -rf "$STAGE_DIR" 2>/dev/null
+        fail_install "Failed to restore filter $manifest_fname from dedicated backup" "从专属备份还原订阅 $manifest_fname 失败"
+      fi
     fi
   done < "$UPGRADE_BACKUP_DIR/filters.manifest"
-  rm -rf "$BIN_DIR/data/filters" 2>/dev/null || true
-  mv -f "$BIN_DIR/data/filters.rebuild.$$" "$BIN_DIR/data/filters" || {
-    rm -rf "$STAGE_DIR" 2>/dev/null
-    fail_install "Failed to activate preserved filters directory" "启用已保留的订阅目录失败"
-  }
 
-  # 9. 清理历史遗留的无用缓存库与暂存目录，仅保留本次升级专属备份与最新备份软链
+  # 9. 清理历史遗留的无用缓存库与暂存目录，仅保留本次升级专属备份
   rm -rf "$STAGE_DIR" "$AGH_DIR/ifw" "$BIN_DIR/agh_pid" "$AGH_DIR/datachart"* "$AGH_DIR/app_pause_active" 2>/dev/null || true
   rm -f "$BIN_DIR/data/stats.db"* "$BIN_DIR/data/sessions.db"* "$BIN_DIR/data/querylog.json"* 2>/dev/null || true
   for old_bak in "$AGH_DIR"/backup_upgrade_*; do
@@ -352,15 +385,14 @@ else
   # ==================== 首次安装路径 ====================
   i18n_print "- Fresh installation: extracting default configuration and rules" "- 首次安装：正在解压默认配置与规则"
   mkdir -p "$AGH_DIR" "$BIN_DIR" "$SCRIPT_DIR" || fail_install "Failed to create AGH_DIR" "创建模块运行目录失败"
-  unzip -q -o "$ZIPFILE" "scripts/*" -d "$AGH_DIR" || fail_install "Failed to extract scripts" "解压脚本文件失败"
-  unzip -q -o "$ZIPFILE" "bin/*" -d "$AGH_DIR" || fail_install "Failed to extract bin" "解压核心与规则文件失败"
+  unzip -q -o "$ZIPFILE" "scripts/*" "bin/*" -d "$AGH_DIR" || fail_install "Failed to extract runtime files" "解压程序与规则文件失败"
   if [ -s "$BIN_DIR/AdGuardHome.yaml" ]; then
     cp -f "$BIN_DIR/AdGuardHome.yaml" "$BIN_DIR/AdGuardHome.yaml.bak" 2>/dev/null || true
   fi
 fi
 
 i18n_print "- Setting permissions" "- 设置权限"
-find "$AGH_DIR" -type d -exec chmod 0700 {} \; 2>/dev/null || true
+find "$AGH_DIR" -type d -exec chmod 0700 {} + 2>/dev/null || true
 chmod +x "$BIN_DIR/AdGuardHome" || fail_install "Failed to chmod AdGuardHome" "设置核心执行权限失败"
 chmod +x "$SCRIPT_DIR"/*.sh || fail_install "Failed to chmod scripts" "设置脚本执行权限失败"
 chown root:net_raw "$BIN_DIR/AdGuardHome" 2>/dev/null || true
@@ -402,6 +434,7 @@ fi
 # 安装 AdGuard Home 管理器 APP 到手机主用户 (User 0)
 # 保持相同包名与签名覆盖升级，绝不卸载不属于本模块的应用，也不清除用户数据掩盖失败
 if [ -f "$MODPATH/AdGuardHomeManager.apk" ]; then
+  i18n_print "- Installing Manager APK" "- 正在安装或更新管理器 APK"
   install_res=$(pm install -r -d -g --user 0 "$MODPATH/AdGuardHomeManager.apk" 2>&1 || true)
   if ! echo "$install_res" | grep -q "Success"; then
     install_res=$(pm install -r -d -g "$MODPATH/AdGuardHomeManager.apk" 2>&1 || true)
