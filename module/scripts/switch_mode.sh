@@ -413,12 +413,12 @@ is_file_kernel_locked() {
         exec 6<>"$chk_file" 2>/dev/null || exit 2
         if run_flock_nb 6; then
             run_flock_unlock 6 || true
-            exec 6>&- 2>/dev/null || true
+            exec 6<&- 6>&- 2>/dev/null || true
             exit 1
         fi
-        exec 6>&- 2>/dev/null || true
+        exec 6<&- 6>&- 2>/dev/null || true
         exit 0
-    ) 7>&- 8>&- 9>&-
+    ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&-
 }
 
 test_flock_candidate_3step() {
@@ -442,11 +442,11 @@ test_flock_candidate_3step() {
         pf="$1"; ready="$2"; rel="$3"; cbin="$4"; csub="$5"; bb="$6"
         exec 7<>"$pf" 2>/dev/null || exit 11
         if [ -n "$csub" ]; then
-            "$cbin" "$csub" -n 0 0<&7 >/dev/null 2>&1 || exit 12
+            "$cbin" "$csub" -n 0 0<&7 >/dev/null 2>&1 || { exec 7<&- 7>&- 2>/dev/null || true; exit 12; }
         else
-            "$cbin" -n 0 0<&7 >/dev/null 2>&1 || exit 12
+            "$cbin" -n 0 0<&7 >/dev/null 2>&1 || { exec 7<&- 7>&- 2>/dev/null || true; exit 12; }
         fi
-        printf "%s\n" "$$" > "$ready" 2>/dev/null || exit 13
+        printf "%s\n" "$$" > "$ready" 2>/dev/null || { exec 7<&- 7>&- 2>/dev/null || true; exit 13; }
         w=0
         while [ ! -f "$rel" ] && [ "$w" -lt 60 ]; do
             sleep 0.05 2>/dev/null || { [ -n "$bb" ] && "$bb" sleep 0.05 2>/dev/null; } || /system/bin/toybox sleep 0.05 2>/dev/null || sleep 1
@@ -457,9 +457,9 @@ test_flock_candidate_3step() {
         else
             "$cbin" -u 0 0<&7 >/dev/null 2>&1 || true
         fi
-        exec 7>&- 2>/dev/null || true
+        exec 7<&- 7>&- 2>/dev/null || true
         exit 0
-    ' _ "$probe_f" "$probe_ready" "$probe_release" "$c_bin" "$c_sub" "${BB_BIN:-}" 7>&- 8>&- 9>&- &
+    ' _ "$probe_f" "$probe_ready" "$probe_release" "$c_bin" "$c_sub" "${BB_BIN:-}" </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
     p1_pid=$!
 
     w_rdy=0
@@ -474,6 +474,12 @@ test_flock_candidate_3step() {
 
     if [ ! -f "$probe_ready" ]; then
         : > "$probe_release" 2>/dev/null
+        w_exit=0
+        while kill -0 "$p1_pid" 2>/dev/null && [ "$w_exit" -lt 20 ]; do
+            safe_sleep 0.05 || sleep 1
+            w_exit=$((w_exit + 1))
+        done
+        kill -0 "$p1_pid" 2>/dev/null && kill -9 "$p1_pid" 2>/dev/null || true
         wait "$p1_pid" 2>/dev/null
         step1_rc=$?
         [ "$step1_rc" -eq 0 ] && step1_rc=1
@@ -488,22 +494,28 @@ test_flock_candidate_3step() {
         if [ -n "$csub" ]; then
             if "$cbin" "$csub" -n 0 0<&7 >/dev/null 2>&1; then
                 "$cbin" "$csub" -u 0 0<&7 >/dev/null 2>&1 || true
-                exec 7>&- 2>/dev/null || true
+                exec 7<&- 7>&- 2>/dev/null || true
                 exit 0
             fi
         else
             if "$cbin" -n 0 0<&7 >/dev/null 2>&1; then
                 "$cbin" -u 0 0<&7 >/dev/null 2>&1 || true
-                exec 7>&- 2>/dev/null || true
+                exec 7<&- 7>&- 2>/dev/null || true
                 exit 0
             fi
         fi
-        exec 7>&- 2>/dev/null || true
+        exec 7<&- 7>&- 2>/dev/null || true
         exit 1
-    ' _ "$probe_f" "$c_bin" "$c_sub" 7>&- 8>&- 9>&-
+    ' _ "$probe_f" "$c_bin" "$c_sub" </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&-
     step2_rc=$?
 
     : > "$probe_release" 2>/dev/null
+    w_exit=0
+    while kill -0 "$p1_pid" 2>/dev/null && [ "$w_exit" -lt 20 ]; do
+        safe_sleep 0.05 || sleep 1
+        w_exit=$((w_exit + 1))
+    done
+    kill -0 "$p1_pid" 2>/dev/null && kill -9 "$p1_pid" 2>/dev/null || true
     wait "$p1_pid" 2>/dev/null
     step1_rc=$?
 
@@ -511,15 +523,15 @@ test_flock_candidate_3step() {
         pf="$1"; cbin="$2"; csub="$3"
         exec 7<>"$pf" 2>/dev/null || exit 31
         if [ -n "$csub" ]; then
-            "$cbin" "$csub" -n 0 0<&7 >/dev/null 2>&1 || { exec 7>&- 2>/dev/null || true; exit 1; }
+            "$cbin" "$csub" -n 0 0<&7 >/dev/null 2>&1 || { exec 7<&- 7>&- 2>/dev/null || true; exit 1; }
             "$cbin" "$csub" -u 0 0<&7 >/dev/null 2>&1 || true
         else
-            "$cbin" -n 0 0<&7 >/dev/null 2>&1 || { exec 7>&- 2>/dev/null || true; exit 1; }
+            "$cbin" -n 0 0<&7 >/dev/null 2>&1 || { exec 7<&- 7>&- 2>/dev/null || true; exit 1; }
             "$cbin" -u 0 0<&7 >/dev/null 2>&1 || true
         fi
-        exec 7>&- 2>/dev/null || true
+        exec 7<&- 7>&- 2>/dev/null || true
         exit 0
-    ' _ "$probe_f" "$c_bin" "$c_sub" 7>&- 8>&- 9>&-
+    ' _ "$probe_f" "$c_bin" "$c_sub" </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&-
     step3_rc=$?
 
     rm -f "$probe_f" "$probe_ready" "$probe_release" 2>/dev/null

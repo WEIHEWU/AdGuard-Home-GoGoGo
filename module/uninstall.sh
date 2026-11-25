@@ -2,6 +2,8 @@
 AGH_DIR="/data/adb/agh"
 ADGPATH="/data/adb/modules/AdGuardHome"
 PROXY_SCRIPT="$AGH_DIR/scripts/ProxyConfig.sh"
+[ -f "$AGH_DIR/scripts/config.prop" ] && . "$AGH_DIR/scripts/config.prop"
+redir_port="${redir_port:-55453}"
 
 # 1. 检查并强制停止所有 AdGuardHome 及关联守护进程 (极速干净退出)
 for pid_f in /dev/shm/agh_watchdog.pid "$AGH_DIR/run/agh_watchdog.pid" \
@@ -73,6 +75,15 @@ while iptables -w 2 -D OUTPUT -p udp --dport 853 -j REJECT 2>/dev/null; do :; do
 while iptables -w 2 -D OUTPUT -p tcp --dport 853 -j DROP 2>/dev/null; do :; done
 while iptables -w 2 -D OUTPUT -p udp --dport 853 -j DROP 2>/dev/null; do :; done
 while iptables -w 2 -D OUTPUT -p udp --dport 443 -j REJECT 2>/dev/null; do :; done
+while ip6tables -w 2 -D OUTPUT -p tcp --dport 853 -j REJECT 2>/dev/null; do :; done
+while ip6tables -w 2 -D OUTPUT -p udp --dport 853 -j REJECT 2>/dev/null; do :; done
+while ip6tables -w 2 -D OUTPUT -p tcp --dport 853 -j DROP 2>/dev/null; do :; done
+while ip6tables -w 2 -D OUTPUT -p udp --dport 853 -j DROP 2>/dev/null; do :; done
+while ip6tables -w 2 -D OUTPUT -p udp --dport 443 -j REJECT 2>/dev/null; do :; done
+while ip6tables -w 2 -D OUTPUT -p udp --dport 53 -j DROP 2>/dev/null; do :; done
+while ip6tables -w 2 -D OUTPUT -p tcp --dport 53 -j DROP 2>/dev/null; do :; done
+while ip6tables -w 2 -D OUTPUT -p udp --dport 53 -j REJECT 2>/dev/null; do :; done
+while ip6tables -w 2 -D OUTPUT -p tcp --dport 53 -j REJECT 2>/dev/null; do :; done
 
 # 清理热点 VPN 转发与策略路由
 while iptables -w 2 -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null; do :; done

@@ -71,9 +71,39 @@ mkdir -p "$MODPATH" || fail_install "Failed to create MODPATH" "创建模块目�
 unzip -q -o "$ZIPFILE" uninstall.sh module.prop service.sh action.sh AdGuardHomeManager.apk -d "$MODPATH" || \
   fail_install "Failed to extract basic module files" "解压模块基本文件失败"
 
-# 检查并停止运行中的进程（按 PID 校验 / pidof / pgrep 精准定位，禁止全 /proc 遍历调用 tr 触发上千次 fork 阻塞）
+# 幂等且容错卸载所有在途防火墙规则（全新首次刷入无任何链时 100% 静默通过，覆盖刷入停进程前先放行直连防断网）
+disarm_active_firewall_safe() {
+  for _ipt_cmd in iptables ip6tables; do
+    command -v "$_ipt_cmd" >/dev/null 2>&1 || continue
+    while "$_ipt_cmd" -w 2 -t nat -D OUTPUT -j ADGUARD 2>/dev/null; do :; done
+    "$_ipt_cmd" -w 2 -t nat -F ADGUARD 2>/dev/null || true
+    "$_ipt_cmd" -w 2 -t nat -X ADGUARD 2>/dev/null || true
+    while "$_ipt_cmd" -w 2 -t nat -D OUTPUT -j ADGUARD6_NAT 2>/dev/null; do :; done
+    "$_ipt_cmd" -w 2 -t nat -F ADGUARD6_NAT 2>/dev/null || true
+    "$_ipt_cmd" -w 2 -t nat -X ADGUARD6_NAT 2>/dev/null || true
+    while "$_ipt_cmd" -w 2 -t filter -D OUTPUT -j ADGUARD6 2>/dev/null; do :; done
+    "$_ipt_cmd" -w 2 -t filter -F ADGUARD6 2>/dev/null || true
+    "$_ipt_cmd" -w 2 -t filter -X ADGUARD6 2>/dev/null || true
+    while "$_ipt_cmd" -w 2 -t filter -D OUTPUT -j ADGUARD_DOT 2>/dev/null; do :; done
+    "$_ipt_cmd" -w 2 -t filter -F ADGUARD_DOT 2>/dev/null || true
+    "$_ipt_cmd" -w 2 -t filter -X ADGUARD_DOT 2>/dev/null || true
+    while "$_ipt_cmd" -w 2 -t filter -D INPUT -j AGH_INPUT 2>/dev/null; do :; done
+    "$_ipt_cmd" -w 2 -t filter -F AGH_INPUT 2>/dev/null || true
+    "$_ipt_cmd" -w 2 -t filter -X AGH_INPUT 2>/dev/null || true
+    while "$_ipt_cmd" -w 2 -t mangle -D OUTPUT -j AGH_SNI 2>/dev/null; do :; done
+    "$_ipt_cmd" -w 2 -t mangle -F AGH_SNI 2>/dev/null || true
+    "$_ipt_cmd" -w 2 -t mangle -X AGH_SNI 2>/dev/null || true
+    while "$_ipt_cmd" -w 2 -t filter -D OUTPUT -j AGH_SNI 2>/dev/null; do :; done
+    "$_ipt_cmd" -w 2 -t filter -F AGH_SNI 2>/dev/null || true
+    "$_ipt_cmd" -w 2 -t filter -X AGH_SNI 2>/dev/null || true
+  done
+  return 0
+}
+
+# 检查并停止运行中的进程（先卸规则恢复直连再杀进程，按 PID 校验 / pidof / pgrep 精准定位，禁止全 /proc 遍历调用 tr 触发上千次 fork 阻塞）
 if [ -d "$AGH_DIR" ]; then
   i18n_print "- Stopping AdGuardHome and its additional processes" "- 正在终止AdGuardHome及附加进程"
+  disarm_active_firewall_safe || true
   collect_agh_target_pids() {
     _cap_pids=""
     if [ -r "$BIN_DIR/AdGuardHome.pid" ]; then
@@ -438,7 +468,8 @@ chown root:net_raw "$BIN_DIR/AdGuardHome" 2>/dev/null || true
 # 立即执行一次性安全解锁与广告缓存清理（主用户，零死循环）
 sh "$SCRIPT_DIR/NoAdsService.sh" >/dev/null 2>&1 || true
 
-# 清理旧版本可能残留的冲突规则与策略路由
+# 清理旧版本可能残留的冲突规则与策略路由（全量容错）
+disarm_active_firewall_safe || true
 ip rule del pref 99 2>/dev/null || true
 ip rule del pref 100 2>/dev/null || true
 ip rule del pref 101 2>/dev/null || true
@@ -450,19 +481,13 @@ while iptables -w 2 -D OUTPUT -p udp --dport 853 -j DROP 2>/dev/null; do :; done
 while iptables -w 2 -D OUTPUT -p udp --dport 443 -j REJECT 2>/dev/null; do :; done
 while ip6tables -w 2 -D OUTPUT -p tcp --dport 853 -j REJECT 2>/dev/null; do :; done
 while ip6tables -w 2 -D OUTPUT -p udp --dport 853 -j REJECT 2>/dev/null; do :; done
+while ip6tables -w 2 -D OUTPUT -p tcp --dport 853 -j DROP 2>/dev/null; do :; done
+while ip6tables -w 2 -D OUTPUT -p udp --dport 853 -j DROP 2>/dev/null; do :; done
 while ip6tables -w 2 -D OUTPUT -p udp --dport 443 -j REJECT 2>/dev/null; do :; done
-while iptables -w 2 -t mangle -D OUTPUT -j AGH_SNI 2>/dev/null; do :; done
-iptables -w 2 -t mangle -F AGH_SNI 2>/dev/null || true
-iptables -w 2 -t mangle -X AGH_SNI 2>/dev/null || true
-while ip6tables -w 2 -t mangle -D OUTPUT -j AGH_SNI 2>/dev/null; do :; done
-ip6tables -w 2 -t mangle -F AGH_SNI 2>/dev/null || true
-ip6tables -w 2 -t mangle -X AGH_SNI 2>/dev/null || true
-while iptables -w 2 -t filter -D OUTPUT -j AGH_SNI 2>/dev/null; do :; done
-iptables -w 2 -t filter -F AGH_SNI 2>/dev/null || true
-iptables -w 2 -t filter -X AGH_SNI 2>/dev/null || true
-while ip6tables -w 2 -t filter -D OUTPUT -j AGH_SNI 2>/dev/null; do :; done
-ip6tables -w 2 -t filter -F AGH_SNI 2>/dev/null || true
-ip6tables -w 2 -t filter -X AGH_SNI 2>/dev/null || true
+while ip6tables -w 2 -D OUTPUT -p udp --dport 53 -j DROP 2>/dev/null; do :; done
+while ip6tables -w 2 -D OUTPUT -p tcp --dport 53 -j DROP 2>/dev/null; do :; done
+while ip6tables -w 2 -D OUTPUT -p udp --dport 53 -j REJECT 2>/dev/null; do :; done
+while ip6tables -w 2 -D OUTPUT -p tcp --dport 53 -j REJECT 2>/dev/null; do :; done
 
 proxy_url_chk=$(sed -n 's/^PROXY_URL=//p' "$SCRIPT_DIR/config.prop" 2>/dev/null | tr -d '"' | tr -d "'" | tr -d '[:space:]' || true)
 if [ -n "$proxy_url_chk" ]; then

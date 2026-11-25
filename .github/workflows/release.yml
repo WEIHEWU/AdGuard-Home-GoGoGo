@@ -24,7 +24,7 @@ jobs:
         run: |
           case "${GITHUB_REF_NAME:-}" in
             v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
-            *)  VERSION_TAG="v20261123.1-rc.3" ;;
+            *)  VERSION_TAG="v20261125.1" ;;
           esac
           VERSION_DATE="${VERSION_TAG#v}"
           case "$VERSION_TAG" in
@@ -54,18 +54,25 @@ jobs:
           prerelease: ${{ env.IS_PRERELEASE == 'true' }}
           make_latest: ${{ env.MAKE_LATEST }}
           body: |
-            ### AdGuard Home GoGoGo `${{ env.VERSION_TAG }}` (Pre-release / Watchdog 低功耗与软重启适配候选版)
+            ### AdGuard Home GoGoGo `${{ env.VERSION_TAG }}`
 
-            基于 `v20261117.3` 正式版发布候选测试版，内置 **[AdGuard-Home-GoGoGo-Core v2026-11-16-rc.3](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core)** 与 **[AdGuard-Home-GoGoGo-Manager v2.24.28](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager)**：
+            全设备级满血 DNS + SNI (`443/8443`) 双引擎去广告防火墙模块正式版，内置 **[AdGuard-Home-GoGoGo-Core v2026-11-25](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core/releases/tag/v2026-11-25)** 与 **[AdGuard-Home-GoGoGo-Manager v2.24.29](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager/releases/tag/v2.24.29)**：
 
-            > ⚠️ **验证与实机状态说明**：Core 二进制（`c5e38874ab9a413b5f5e668301058e46ed1e258ce83dc73c380c79d529201f3a`）、Manager APK（`90578f70318934936a868dccf5a606cba54245d98625133ad59d1c85024a3c32`）与默认规则/过滤订阅均未变更；模块脚本已完成 `/bin/sh -n`、`/bin/ksh -n` 语法校验及沙盒回归套件（`TEST 1`–`TEST 10`，含 `10A`–`10G` 软重启门控、余震复检、零命令快速层与僵尸进程拦截）。当前尚未在真机连续挂机验证耗电与软重启实景日志，作为候选版发布以供刷入实测，暂不覆盖 `v20261117.3` Latest 稳定版。
+            - **Core (`v2026-11-25`)**: `12,320,892 B` · SHA-256 `d7b639ac111843afc5d6ed1e3cbf169c58f28740751909e4a6540aa4d9bdcda4`
+            - **Manager (`v2.24.29+199`)**: `8,873,878 B` · SHA-256 `d30e2725483f3d2420259efaaf2b867c55a6f86e3e86f1bae784718d02ad5640`
 
-            #### 本次更新内容（`customize.sh` 升级加速 + `service.sh --watchdog` 低功耗重构 & 软重启适配）
-            - **升级刷入极速优化（`customize.sh`，不降级安全性）**：重构“正在终止 AdGuardHome 及附加进程”，取消全手机 `/proc/[0-9]*` 遍历与千次 `tr` 子进程 `fork` + `sleep 1` 二次扫描，改为 PID 校验 + `pidof`/`pgrep -f` + `0.1s` 短等待秒停进程；升级路径跳过包内自带默认规则解压；订阅目录 `/data/adb/agh/bin/data/filters` 原地保留（只做单向备份并记录清单，取消二次全量回写及双倍 `cmp` 字节重读）；同分区核心与脚本改用 `mv -f` 原子替换；合并为新核心单次 `--check-config` 校验并一次性解压基本文件。
-            - **两级零功耗哨兵架构**：`--watchdog` 以 `nice 19` 最低优先级运行；60 秒高频快速层仅通过纯 Shell 内置读取 `/proc/<pid>` 与 `/sys/class/net` 检测 `AdGuardHome`、`netd`、`system_server` 及 VPN 接口变化（稳态零外部进程 `fork`），拦截 `State: Z/X` 僵尸/死亡态及 PID 复用；10 分钟低频层执行规则与端口核验，20 分钟执行一次 `ensure_private_dns_off`（`settings get`）/ 残留清理 / `ProxyConfig.sh --once`。
-            - **Root 软重启完整适配**：快速层监控 `system_server` 与 `netd` 进程变化；捕获软重启后先校验并等待 `sys.boot_completed=1`（期间切为 5 秒轻轮询防抢跑），就绪后同步关停私人 DNS、无损复用健康核心、按需重挂规则，并自动安排 1 轮一次性防余震复检应对 `ConnectivityService` 延迟洗表。
-            - **最小 `iptables` 核验与统一退避**：`nat_rules_healthy()` 改为主链 `-C` + 自有小链（`ADGUARD` / `ADGUARD6_NAT` / `AGH_SNI`）单链 `-S` 纯 Shell `case` 解析（单次核验降至 6~8 次进程调用、0 个 `grep`，补齐 `--gid-owner 23333` 防环回校验）；`iptables.sh` 的 `post_apply_check()` 兼容 `queue_num=0` 被内核省略 `--queue-num 0` 的默认输出；核心与防火墙修复失败共享统一递增退避策略。
-            - **启动期优先级与单实例收敛**：`spawn_agh_in_root_ns()` 通过 `reset_spawn_priority()` 恢复核心 `nice 0`，避免受守护进程 `nice 19` 继承影响；`start_singleton_watchdog()` 改为有界等待守护锁就绪。
+            #### 本次正式版更新亮点
+            1. **SNI 与核心稳定性加固 (`Core v2026-11-25`)**：
+               - SNI `NFQUEUE`（`queue_num=0`）`queueReadTimeout` 调整为 `2s` 并启用 `1 MiB` `SO_RCVBUF` 与退避重连，大幅降低空闲唤醒并保证退出可控；区分可恢复 `ENOBUFS` 与真实断连、捕获 `handlePacket` panic、修复退出唤醒读写时序；
+               - 修复规则定时更新与 `/control/filtering/refresh` 并发锁、`dialcontext`/Android `RootCAs` 与 DoH 上游回环路径、运行时 `core_crash.log` 512 KiB 有界轮转；
+               - 彻底移除强制 `SetMemoryLimit` / `SetGCPercent` 人为上限，恢复 Go 官方默认 GC 与内存调度，避免高规则/大查询下的抖动。
+            2. **软重启零抖动、高省电与 `--diag-flock` 修复 (`Module`)**：
+               - `customize.sh` 覆盖刷入先幂等容错卸载旧链，零中断平滑升级并支持极速停进程与单向增量备份；
+               - `service.sh --watchdog` 两级哨兵实测 1.5 小时仅约 2 秒 CPU：纯 Shell `/proc` 快速层、`is_system_ready_after_soft_reboot`（`sys.boot_completed` + `init.svc.zygote` + `system_server` PID 就绪门控 + 一次性防余震复检）、僵尸态 `State: Z/X` 精准剔除、`ADGUARD6_NAT` GID 与 `--connbytes 1:8` 双链完整性核验、以及按全仓 `/apex` + `/system` + `/data` 最大 mtime 构建 Conscrypt CA 包；
+               - 修复 `service.sh --diag-flock` 子进程测试管道句柄未关闭与 `/proc` 全量 fork 阻塞问题，确保诊断包全 8 项采集快速完整返回 `ok`。
+            3. **诊断包公共 `Download` 导出与本地时间命名 (`Manager v2.24.29`)**：
+               - 诊断包默认同步保存至系统公共 `Download/agh_diag_YYYYMMDD_HHMMSS_xxxx.zip`（设备本地时间命名，同时在 manifest 保留 UTC 与带偏移本地时间），弹窗明确展示保存路径并保留系统分享入口；
+               - 聚合日志点击详情内新增一键放行/拦截入口（保持日志列表行布局紧凑无改动），并全面加固 `su` 超时进程回收、`restoreFactoryUserRules` 失败防清空与端口同步。
           files: |
             releases/AdGuard_Home_gogogo_${{ env.VERSION_DATE }}.zip
             releases/AdGuardHomeManager.apk

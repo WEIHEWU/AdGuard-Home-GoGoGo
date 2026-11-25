@@ -22,9 +22,12 @@ CONFIG_FILE="${CONFIG_FILE:-$SCRIPT_DIR/config.prop}"
 MAIN_LOG="${MAIN_LOG:-$AGH_DIR/agh.log}"
 OWNERSHIP_DIR="${OWNERSHIP_DIR:-$AGH_DIR/proxy_ownership}"
 if [ -z "${RUN_DIR:-}" ]; then
-    if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+    mkdir -p /dev/shm 2>/dev/null
+    if ( : >> /dev/shm/.agh_probe ) 2>/dev/null; then
+        rm -f /dev/shm/.agh_probe 2>/dev/null
         RUN_DIR="/dev/shm"
     else
+        mkdir -p "$AGH_DIR/run" 2>/dev/null
         RUN_DIR="$AGH_DIR/run"
     fi
 fi

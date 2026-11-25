@@ -95,6 +95,7 @@ else
     mkdir -p "$RUN_DIR" 2>/dev/null
 fi
 RUN_DIR="$(cd "$RUN_DIR" 2>/dev/null && pwd || resolve_abs_path "$RUN_DIR")"
+export RUN_DIR
 
 WATCHDOG_LOCK_FILE="$(resolve_abs_path "$RUN_DIR/agh_watchdog.flock")"
 WATCHDOG_PID_FILE="$(resolve_abs_path "$RUN_DIR/agh_watchdog.pid")"
@@ -429,12 +430,12 @@ is_file_kernel_locked() {
         exec 6<>"$chk_file" 2>/dev/null || exit 2
         if run_flock_nb 6; then
             run_flock_unlock 6 || true
-            exec 6>&- 2>/dev/null || true
+            exec 6<&- 6>&- 2>/dev/null || true
             exit 1
         fi
-        exec 6>&- 2>/dev/null || true
+        exec 6<&- 6>&- 2>/dev/null || true
         exit 0
-    ) 7>&- 8>&- 9>&-
+    ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&-
 }
 
 test_flock_candidate_3step() {
@@ -454,16 +455,16 @@ test_flock_candidate_3step() {
     probe_release="${probe_f}.release"
     rm -f "$probe_f" "$probe_ready" "$probe_release" 2>/dev/null
 
-    # 步骤 1：第 1 个独立进程打开并持有排他锁一段短时间
+    # 步骤 1：第 1 个独立进程打开并持有排他锁一段短时间（关闭管道与锁 FD 防挂起）
     "$SH_BIN" -c '
         pf="$1"; ready="$2"; rel="$3"; cbin="$4"; csub="$5"; bb="$6"
         exec 7<>"$pf" 2>/dev/null || exit 11
         if [ -n "$csub" ]; then
-            "$cbin" "$csub" -n 0 0<&7 >/dev/null 2>&1 || exit 12
+            "$cbin" "$csub" -n 0 0<&7 >/dev/null 2>&1 || { exec 7<&- 7>&- 2>/dev/null || true; exit 12; }
         else
-            "$cbin" -n 0 0<&7 >/dev/null 2>&1 || exit 12
+            "$cbin" -n 0 0<&7 >/dev/null 2>&1 || { exec 7<&- 7>&- 2>/dev/null || true; exit 12; }
         fi
-        printf "%s\n" "$$" > "$ready" 2>/dev/null || exit 13
+        printf "%s\n" "$$" > "$ready" 2>/dev/null || { exec 7<&- 7>&- 2>/dev/null || true; exit 13; }
         w=0
         while [ ! -f "$rel" ] && [ "$w" -lt 60 ]; do
             sleep 0.05 2>/dev/null || { [ -n "$bb" ] && "$bb" sleep 0.05 2>/dev/null; } || /system/bin/toybox sleep 0.05 2>/dev/null || sleep 1
@@ -474,9 +475,9 @@ test_flock_candidate_3step() {
         else
             "$cbin" -u 0 0<&7 >/dev/null 2>&1 || true
         fi
-        exec 7>&- 2>/dev/null || true
+        exec 7<&- 7>&- 2>/dev/null || true
         exit 0
-    ' _ "$probe_f" "$probe_ready" "$probe_release" "$c_bin" "$c_sub" "${BB_BIN:-}" 7>&- 8>&- 9>&- &
+    ' _ "$probe_f" "$probe_ready" "$probe_release" "$c_bin" "$c_sub" "${BB_BIN:-}" </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
     p1_pid=$!
 
     w_rdy=0
@@ -491,6 +492,12 @@ test_flock_candidate_3step() {
 
     if [ ! -f "$probe_ready" ]; then
         : > "$probe_release" 2>/dev/null
+        w_exit=0
+        while kill -0 "$p1_pid" 2>/dev/null && [ "$w_exit" -lt 20 ]; do
+            safe_sleep 0.05 || sleep 1
+            w_exit=$((w_exit + 1))
+        done
+        kill -0 "$p1_pid" 2>/dev/null && kill -9 "$p1_pid" 2>/dev/null || true
         wait "$p1_pid" 2>/dev/null
         step1_rc=$?
         [ "$step1_rc" -eq 0 ] && step1_rc=1
@@ -506,23 +513,29 @@ test_flock_candidate_3step() {
         if [ -n "$csub" ]; then
             if "$cbin" "$csub" -n 0 0<&7 >/dev/null 2>&1; then
                 "$cbin" "$csub" -u 0 0<&7 >/dev/null 2>&1 || true
-                exec 7>&- 2>/dev/null || true
+                exec 7<&- 7>&- 2>/dev/null || true
                 exit 0
             fi
         else
             if "$cbin" -n 0 0<&7 >/dev/null 2>&1; then
                 "$cbin" -u 0 0<&7 >/dev/null 2>&1 || true
-                exec 7>&- 2>/dev/null || true
+                exec 7<&- 7>&- 2>/dev/null || true
                 exit 0
             fi
         fi
-        exec 7>&- 2>/dev/null || true
+        exec 7<&- 7>&- 2>/dev/null || true
         exit 1
-    ' _ "$probe_f" "$c_bin" "$c_sub" 7>&- 8>&- 9>&-
+    ' _ "$probe_f" "$c_bin" "$c_sub" </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&-
     step2_rc=$?
 
-    # 通知第 1 个进程释放锁并等待其彻底退出
+    # 通知第 1 个进程释放锁并等待其彻底退出（超时强制回收防挂起）
     : > "$probe_release" 2>/dev/null
+    w_exit=0
+    while kill -0 "$p1_pid" 2>/dev/null && [ "$w_exit" -lt 20 ]; do
+        safe_sleep 0.05 || sleep 1
+        w_exit=$((w_exit + 1))
+    done
+    kill -0 "$p1_pid" 2>/dev/null && kill -9 "$p1_pid" 2>/dev/null || true
     wait "$p1_pid" 2>/dev/null
     step1_rc=$?
 
@@ -531,15 +544,15 @@ test_flock_candidate_3step() {
         pf="$1"; cbin="$2"; csub="$3"
         exec 7<>"$pf" 2>/dev/null || exit 31
         if [ -n "$csub" ]; then
-            "$cbin" "$csub" -n 0 0<&7 >/dev/null 2>&1 || { exec 7>&- 2>/dev/null || true; exit 1; }
+            "$cbin" "$csub" -n 0 0<&7 >/dev/null 2>&1 || { exec 7<&- 7>&- 2>/dev/null || true; exit 1; }
             "$cbin" "$csub" -u 0 0<&7 >/dev/null 2>&1 || true
         else
-            "$cbin" -n 0 0<&7 >/dev/null 2>&1 || { exec 7>&- 2>/dev/null || true; exit 1; }
+            "$cbin" -n 0 0<&7 >/dev/null 2>&1 || { exec 7<&- 7>&- 2>/dev/null || true; exit 1; }
             "$cbin" -u 0 0<&7 >/dev/null 2>&1 || true
         fi
-        exec 7>&- 2>/dev/null || true
+        exec 7<&- 7>&- 2>/dev/null || true
         exit 0
-    ' _ "$probe_f" "$c_bin" "$c_sub" 7>&- 8>&- 9>&-
+    ' _ "$probe_f" "$c_bin" "$c_sub" </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&-
     step3_rc=$?
 
     rm -f "$probe_f" "$probe_ready" "$probe_release" 2>/dev/null
@@ -1161,6 +1174,18 @@ disarm_nat_safety_valve() {
         while ip6tables -w 2 -D OUTPUT -j ADGUARD6 2>/dev/null; do :; done
         ip6tables -w 2 -F ADGUARD6 2>/dev/null
         ip6tables -w 2 -X ADGUARD6 2>/dev/null
+        while iptables -w 2 -t filter -D OUTPUT -j ADGUARD_DOT 2>/dev/null; do :; done
+        iptables -w 2 -t filter -F ADGUARD_DOT 2>/dev/null
+        iptables -w 2 -t filter -X ADGUARD_DOT 2>/dev/null
+        while ip6tables -w 2 -t filter -D OUTPUT -j ADGUARD_DOT 2>/dev/null; do :; done
+        ip6tables -w 2 -t filter -F ADGUARD_DOT 2>/dev/null
+        ip6tables -w 2 -t filter -X ADGUARD_DOT 2>/dev/null
+        while iptables -w 2 -t filter -D INPUT -j AGH_INPUT 2>/dev/null; do :; done
+        iptables -w 2 -t filter -F AGH_INPUT 2>/dev/null
+        iptables -w 2 -t filter -X AGH_INPUT 2>/dev/null
+        while ip6tables -w 2 -t filter -D INPUT -j AGH_INPUT 2>/dev/null; do :; done
+        ip6tables -w 2 -t filter -F AGH_INPUT 2>/dev/null
+        ip6tables -w 2 -t filter -X AGH_INPUT 2>/dev/null
         while iptables -w 2 -t mangle -D OUTPUT -j AGH_SNI 2>/dev/null; do :; done
         iptables -w 2 -t mangle -F AGH_SNI 2>/dev/null
         iptables -w 2 -t mangle -X AGH_SNI 2>/dev/null
@@ -1198,14 +1223,21 @@ flush_dns_cache() {
 build_ca_bundle() {
     temp="$CA_BUNDLE.tmp"
     if [ -s "$CA_BUNDLE" ]; then
+        bundle_mtime=$(stat -c %Y "$CA_BUNDLE" 2>/dev/null)
+        max_source_mtime=0
         for cert_dir in /system/etc/security/cacerts /apex/com.android.conscrypt/cacerts /apex/com.android.conscrypt/etc/security/cacerts /data/misc/keychain/cacerts-added; do
             [ -d "$cert_dir" ] || continue
-            bundle_mtime=$(stat -c %Y "$CA_BUNDLE" 2>/dev/null)
             source_mtime=$(stat -c %Y "$cert_dir" 2>/dev/null)
-            if [ -n "$bundle_mtime" ] && [ -n "$source_mtime" ] && [ "$bundle_mtime" -ge "$source_mtime" ]; then
-                return 0
+            case "$source_mtime" in
+                ''|*[!0-9]*) continue ;;
+            esac
+            if [ "$source_mtime" -gt "$max_source_mtime" ]; then
+                max_source_mtime="$source_mtime"
             fi
         done
+        if [ -n "$bundle_mtime" ] && [ "$max_source_mtime" -gt 0 ] && [ "$bundle_mtime" -ge "$max_source_mtime" ]; then
+            return 0
+        fi
     fi
     rm -f "$temp" 2>/dev/null
     for cert_dir in /system/etc/security/cacerts /apex/com.android.conscrypt/cacerts /apex/com.android.conscrypt/etc/security/cacerts /data/misc/keychain/cacerts-added; do
@@ -1558,6 +1590,7 @@ nat_rules_healthy() {
         ip6tables -w 2 -t nat -C OUTPUT -j ADGUARD6_NAT >/dev/null 2>&1 || return 1
         _adg6_chain="$(ip6tables -w 2 -t nat -S ADGUARD6_NAT 2>/dev/null || true)"
         [ -n "$_adg6_chain" ] || return 1
+        _adg6_gid=0
         _adg6_udp=0
         _adg6_tcp=0
         _nrh_old_ifs="$IFS"
@@ -1566,15 +1599,17 @@ nat_rules_healthy() {
         set -f
         for _adg6_line in $_adg6_chain; do
             case "$_adg6_line" in
+                "-A ADGUARD6_NAT "*"-m owner "*"--gid-owner $AGH_GID "*"-j RETURN"*)
+                    _adg6_gid=1 ;;
                 "-A ADGUARD6_NAT -p udp "*"--dport 53 "*"-j REDIRECT --to-ports $check_port"|"-A ADGUARD6_NAT -p udp "*"--dport 53 "*"-j REDIRECT --to-ports $check_port "*)
-                    _adg6_udp=1 ;;
+                    [ "$_adg6_gid" -eq 1 ] && _adg6_udp=1 ;;
                 "-A ADGUARD6_NAT -p tcp "*"--dport 53 "*"-j REDIRECT --to-ports $check_port"|"-A ADGUARD6_NAT -p tcp "*"--dport 53 "*"-j REDIRECT --to-ports $check_port "*)
-                    _adg6_tcp=1 ;;
+                    [ "$_adg6_gid" -eq 1 ] && _adg6_tcp=1 ;;
             esac
         done
         set +f
         IFS="$_nrh_old_ifs"
-        [ "$_adg6_udp" -eq 1 ] && [ "$_adg6_tcp" -eq 1 ] || return 1
+        [ "$_adg6_gid" -eq 1 ] && [ "$_adg6_udp" -eq 1 ] && [ "$_adg6_tcp" -eq 1 ] || return 1
     elif [ "$v6_mode" = "filter" ]; then
         ip6tables -w 2 -t filter -C OUTPUT -j ADGUARD6 >/dev/null 2>&1 || return 1
     fi
@@ -1609,7 +1644,7 @@ nat_rules_healthy() {
                     *"-A AGH_SNI "*"-p tcp "*"-j NFQUEUE"*"--queue-bypass"*)
                         if [ "$sni_fw_mode" = "connbytes" ]; then
                             case "$_sni_line" in
-                                *"connbytes"*"1:4"*) ;;
+                                *"connbytes"*"1:8"*) ;;
                                 *) continue ;;
                             esac
                         fi
@@ -1764,6 +1799,7 @@ NETD_TRACKING_ACTIVE=0
 SYS_SERVER_PID=""
 SYS_SERVER_COMM=""
 SYS_SERVER_TRACKING_ACTIVE=0
+SYS_SERVER_EVER_SEEN=0
 AGH_PID=""
 
 resolve_agh_pid() {
@@ -1794,32 +1830,19 @@ resolve_proc_pid_by_comm() {
 
     if [ -n "$_rpb_override_file" ] && [ -r "$_rpb_override_file" ]; then
         IFS= read -r _rpb_p < "$_rpb_override_file" 2>/dev/null || _rpb_p=""
-        case "$_rpb_p" in
-            ''|*[!0-9]*) _rpb_p="" ;;
-            *)
-                [ -d "$PROC_DIR/$_rpb_p" ] || _rpb_p=""
-                ;;
-        esac
+        is_pid_alive_fast "$_rpb_p" "" || _rpb_p=""
     else
         _rpb_p=""
     fi
 
     if [ -z "$_rpb_p" ] && [ -n "$_rpb_prop_name" ]; then
         _rpb_p=$(getprop "$_rpb_prop_name" 2>/dev/null || true)
-        case "$_rpb_p" in
-            ''|*[!0-9]*) _rpb_p="" ;;
-            *)
-                [ -d "$PROC_DIR/$_rpb_p" ] || _rpb_p=""
-                ;;
-        esac
+        is_pid_alive_fast "$_rpb_p" "$_rpb_comm_target" || _rpb_p=""
     fi
 
     if [ -z "$_rpb_p" ]; then
         for _rpb_cand in $(pidof "$_rpb_comm_target" 2>/dev/null); do
-            case "$_rpb_cand" in
-                ''|*[!0-9]*) continue ;;
-            esac
-            if [ -d "$PROC_DIR/$_rpb_cand" ]; then
+            if is_pid_alive_fast "$_rpb_cand" "$_rpb_comm_target"; then
                 _rpb_p="$_rpb_cand"
                 break
             fi
@@ -1833,10 +1856,7 @@ resolve_proc_pid_by_comm() {
             if [ "$_rpb_comm" = "$_rpb_comm_target" ]; then
                 _rpb_dir="${_rpb_cf%/comm}"
                 _rpb_cand="${_rpb_dir##*/}"
-                case "$_rpb_cand" in
-                    ''|*[!0-9]*) continue ;;
-                esac
-                if [ -d "$PROC_DIR/$_rpb_cand" ]; then
+                if is_pid_alive_fast "$_rpb_cand" "$_rpb_comm_target"; then
                     _rpb_p="$_rpb_cand"
                     break
                 fi
@@ -1875,6 +1895,7 @@ resolve_sys_server_pid() {
         SYS_SERVER_PID="$RESOLVED_PID"
         SYS_SERVER_COMM="${RESOLVED_COMM:-}"
         SYS_SERVER_TRACKING_ACTIVE=1
+        SYS_SERVER_EVER_SEEN=1
         return 0
     fi
     return 1
@@ -1970,7 +1991,7 @@ diagnose_flock_state() {
 
     for sub_script in "$switch_bin_path" "$ipt_bin_path"; do
         [ -f "$sub_script" ] || continue
-        sub_out=$("$SH_BIN" "$sub_script" --diag-flock --brief 2>/dev/null || true)
+        sub_out=$("$SH_BIN" "$sub_script" --diag-flock --brief </dev/null 2>/dev/null || true)
         printf '%s\n' "$sub_out"
         sub_status=$(printf '%s\n' "$sub_out" | sed -n 's/.*status=\([^ ]*\).*/\1/p' | head -n 1)
         sub_impl=$(printf '%s\n' "$sub_out" | sed -n 's/.*impl=\([^ ]*\).*/\1/p' | head -n 1)
@@ -1980,16 +2001,16 @@ diagnose_flock_state() {
         fi
     done
 
-    # 2. 父子锁验证测试（仅使用独立临时锁文件，不触碰正式锁）
+    # 2. 父子锁验证测试（仅使用独立临时锁文件，不触碰正式锁；显式重定向并关闭管道/锁 FD 防挂起）
     pc_status="PASS"
     pc_file="$RUN_DIR/.agh_flock_pc_diag.$$"
     pc_pid_f="${pc_file}.pid"
     rm -f "$pc_file" "$pc_pid_f" 2>/dev/null
     (
         exec 7<>"$pc_file" 2>/dev/null || exit 1
-        run_flock_nb 7 || exit 1
+        run_flock_nb 7 || { exec 7<&- 7>&- 2>/dev/null || true; exit 1; }
         printf '%s\n' "$$" > "$pc_pid_f" 2>/dev/null
-        # 模拟同步子进程：关闭 7/8/9，仅验证父锁存活且不会误解父锁
+        # 模拟同步子进程：关闭 7/8/9 与父级输出管道，仅验证父锁存活且不会误解父锁
         "$SH_BIN" -c '
             pf="$1"; pidf="$2"; pp="$3"; cbin="$4"; csub="$5"
             [ -r "$pidf" ] && [ "$(cat "$pidf" 2>/dev/null)" = "$pp" ] || exit 1
@@ -1997,33 +2018,39 @@ diagnose_flock_state() {
             if [ -n "$csub" ]; then
                 if "$cbin" "$csub" -n 0 0<&6 >/dev/null 2>&1; then
                     "$cbin" "$csub" -u 0 0<&6 >/dev/null 2>&1 || true
-                    exec 6>&- 2>/dev/null || true
+                    exec 6<&- 6>&- 2>/dev/null || true
                     exit 1
                 fi
             else
                 if "$cbin" -n 0 0<&6 >/dev/null 2>&1; then
                     "$cbin" -u 0 0<&6 >/dev/null 2>&1 || true
-                    exec 6>&- 2>/dev/null || true
+                    exec 6<&- 6>&- 2>/dev/null || true
                     exit 1
                 fi
             fi
-            exec 6>&- 2>/dev/null || true
+            exec 6<&- 6>&- 2>/dev/null || true
             exit 0
-        ' _ "$pc_file" "$pc_pid_f" "$$" "$FLOCK_RESOLVED_BIN" "$FLOCK_RESOLVED_SUBCMD" 7>&- 8>&- 9>&- || exit 2
+        ' _ "$pc_file" "$pc_pid_f" "$$" "$FLOCK_RESOLVED_BIN" "$FLOCK_RESOLVED_SUBCMD" </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- || {
+            run_flock_unlock 7 || true
+            exec 7<&- 7>&- 2>/dev/null || true
+            exit 2
+        }
         # 验证子进程退出后，父锁依然处于被锁定状态（未被子进程误解锁）
         if ( exec 6<>"$pc_file" 2>/dev/null && run_flock_nb 6 ); then
             run_flock_unlock 6 || true
-            exec 6>&- 2>/dev/null || true
+            exec 6<&- 6>&- 2>/dev/null || true
+            run_flock_unlock 7 || true
+            exec 7<&- 7>&- 2>/dev/null || true
             exit 3
         fi
         run_flock_unlock 7 || true
-        exec 7>&- 2>/dev/null || true
+        exec 7<&- 7>&- 2>/dev/null || true
         # 父进程释放后应可重新加锁
-        if ! ( exec 6<>"$pc_file" 2>/dev/null && run_flock_nb 6 && { run_flock_unlock 6 || true; exec 6>&- 2>/dev/null || true; exit 0; } ); then
+        if ! ( exec 6<>"$pc_file" 2>/dev/null && run_flock_nb 6 && { run_flock_unlock 6 || true; exec 6<&- 6>&- 2>/dev/null || true; exit 0; } ); then
             exit 4
         fi
         exit 0
-    ) 7>&- 8>&- 9>&- || pc_status="FAIL"
+    ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- || pc_status="FAIL"
     rm -f "$pc_file" "$pc_pid_f" 2>/dev/null
     printf 'PARENT_CHILD_LOCK_TEST status=%s\n' "$pc_status"
 
@@ -2059,19 +2086,41 @@ diagnose_flock_state() {
     active_op_holders=0
     core_bin="$BIN_DIR/AdGuardHome"
     core_bin_real=$(resolve_symlink_target "$core_bin")
+    cr_char=$(printf '\r')
 
     for pdir in "$PROC_DIR"/[0-9]*; do
         [ -d "$pdir" ] || continue
         pid_num="${pdir##*/}"
         [ "$pid_num" = "$$" ] && continue
 
-        # 优先读取 exe、comm 与 NUL 分隔的 cmdline 参数；若进程在扫描瞬间退出则安全跳过
+        # 纯 Shell 零派生快速过滤无关 /proc/<pid> 条目，消除数百进程下的数千次 fork 阻塞风险
+        p_comm=""
+        [ -r "$pdir/comm" ] && { IFS= read -r p_comm < "$pdir/comm" 2>/dev/null || true; }
+        p_comm="${p_comm%$cr_char}"
+        c_peek=""
+        [ -r "$pdir/cmdline" ] && { IFS= read -r c_peek < "$pdir/cmdline" 2>/dev/null || true; }
+
+        if [ "$pid_num" != "$op_pid_val" ] && [ "$pid_num" != "$wd_pid_val" ]; then
+            [ -z "$p_comm" ] && [ -z "$c_peek" ] && continue
+            cand_hit=0
+            for _probe_txt in "$p_comm" "$c_peek"; do
+                [ -n "$_probe_txt" ] || continue
+                case "$_probe_txt" in
+                    *AdGuardHome*|*agh_*|*service.sh*|*switch_mode.sh*|*iptables.sh*|*action.sh*|*ProxyConfig.sh*|*NoAdsService.sh*|sh|*/sh|sh\ *|*/sh\ *|*mksh*|*ash*|*dash*|*bash*|*ksh*|*zsh*|*busybox*|*toybox*|su|*/su|su\ *|*/su\ *|*magisk*|*ksud*|*nsenter*|*nohup*|*env*|*timeout*|*flock*|*sleep*|*python*|*perl*)
+                        cand_hit=1
+                        break
+                        ;;
+                esac
+            done
+            [ "$cand_hit" -eq 1 ] || continue
+        fi
+
+        # 仅对候选模块/Shell/核心进程读取 exe 与完整 NUL 分隔 cmdline
         p_exe=""
         if [ -L "$pdir/exe" ] || [ -e "$pdir/exe" ]; then
             p_exe=$(readlink -f "$pdir/exe" 2>/dev/null || readlink "$pdir/exe" 2>/dev/null || true)
         fi
         p_exe_clean="${p_exe% (deleted)}"
-        p_comm=$(cat "$pdir/comm" 2>/dev/null | tr -d '\r\n' || true)
         cmdline_lines=""
         [ -r "$pdir/cmdline" ] && cmdline_lines=$( { tr '\000' '\n' < "$pdir/cmdline"; } 2>/dev/null || true )
         [ -d "$pdir" ] || continue
@@ -2097,7 +2146,8 @@ diagnose_flock_state() {
             fi
         elif [ ! -e "$pdir/exe" ] && [ ! -L "$pdir/exe" ]; then
             # 仅在测试模拟环境或受限内核无 /proc/<pid>/exe 时，严格要求 comm 与 argv[0] 均指向核心本身
-            argv0=$(printf '%s\n' "$cmdline_lines" | head -n 1)
+            argv0="${cmdline_lines%%
+*}"
             if [ "$p_comm" = "AdGuardHome" ]; then
                 case "$argv0" in
                     AdGuardHome|*/AdGuardHome) role="core" ;;
@@ -2105,11 +2155,31 @@ diagnose_flock_state() {
             fi
         fi
 
-        # 2) 守护、辅助脚本与合法短期操作脚本识别（按独立参数与脚本名精确匹配）
+        # 2) 守护、辅助脚本与合法短期操作脚本识别（纯 Shell 参数逐行匹配，零 grep 派生）
         wd_pid_match="n/a"
-        if [ -z "$role" ]; then
-            if printf '%s\n' "$cmdline_lines" | grep -qE '(^|/)service\.sh$' && \
-               printf '%s\n' "$cmdline_lines" | grep -qx -- '--watchdog'; then
+        if [ -z "$role" ] && [ -n "$cmdline_lines" ]; then
+            is_wd_script=0
+            has_wd_flag=0
+            is_proxy_cfg=0
+            is_noads=0
+            is_op_script=0
+            is_diag_flag=0
+            _old_ifs="$IFS"
+            IFS='
+'
+            for _arg in $cmdline_lines; do
+                case "$_arg" in
+                    service.sh|*/service.sh) is_wd_script=1; is_op_script=1 ;;
+                    switch_mode.sh|*/switch_mode.sh|iptables.sh|*/iptables.sh|action.sh|*/action.sh) is_op_script=1 ;;
+                    ProxyConfig.sh|*/ProxyConfig.sh) is_proxy_cfg=1 ;;
+                    NoAdsService.sh|*/NoAdsService.sh) is_noads=1 ;;
+                    --watchdog) has_wd_flag=1 ;;
+                    --diag-flock|diag-flock|--diag-sni|diag-sni) is_diag_flag=1 ;;
+                esac
+            done
+            IFS="$_old_ifs"
+
+            if [ "$is_wd_script" -eq 1 ] && [ "$has_wd_flag" -eq 1 ]; then
                 role="watchdog"
                 case "$wd_pid_val" in
                     ''|none|*[!0-9]*) wd_pid_match="unrecorded" ;;
@@ -2123,14 +2193,12 @@ diagnose_flock_state() {
                         fi
                         ;;
                 esac
-            elif printf '%s\n' "$cmdline_lines" | grep -qE '(^|/)ProxyConfig\.sh$'; then
+            elif [ "$is_proxy_cfg" -eq 1 ]; then
                 role="proxy_cfg"
-            elif printf '%s\n' "$cmdline_lines" | grep -qE '(^|/)NoAdsService\.sh$'; then
+            elif [ "$is_noads" -eq 1 ]; then
                 role="noads"
-            elif printf '%s\n' "$cmdline_lines" | grep -qE '(^|/)(service|switch_mode|iptables|action)\.sh$'; then
-                if ! printf '%s\n' "$cmdline_lines" | grep -qxE -- '--diag-flock|diag-flock|--diag-sni|diag-sni'; then
-                    role="op_script"
-                fi
+            elif [ "$is_op_script" -eq 1 ] && [ "$is_diag_flag" -eq 0 ]; then
+                role="op_script"
             fi
         fi
 
@@ -2247,6 +2315,23 @@ if [ "$1" = "--internal-start-and-mount-under-lock" ]; then
     exit 1
 fi
 
+# 软重启系统就绪门控：兼容 sys.boot_completed=1 不归零的 killall system_server / ctl.restart zygote 场景
+is_system_ready_after_soft_reboot() {
+    _sr_reason="${1:-}"
+    _sr_boot=$(getprop sys.boot_completed 2>/dev/null)
+    if [ -n "$_sr_boot" ] && [ "$_sr_boot" != "1" ]; then
+        return 1
+    fi
+    _sr_zyg=$(getprop init.svc.zygote 2>/dev/null)
+    if [ -n "$_sr_zyg" ] && [ "$_sr_zyg" != "running" ]; then
+        return 1
+    fi
+    if [ "$_sr_reason" = "soft-reboot" ] && [ "${SYS_SERVER_EVER_SEEN:-0}" -eq 1 ]; then
+        resolve_sys_server_pid || return 1
+    fi
+    return 0
+}
+
 # ==============================================================================
 # 子命令 1：独立后台单例「两级零功耗哨兵」守护模式 (--watchdog)
 # - 高频快速层（默认 60 秒/轮，零外部进程开销）：纯 Shell 检测 AGH_PID / NETD_PID / SYS_SERVER_PID 及 VPN 接口变化
@@ -2308,9 +2393,8 @@ if [ "$1" = "--watchdog" ]; then
         watchdog_tick=$((watchdog_tick + 1))
 
         # 软重启/开机过渡期间等待 Android 系统服务就绪（已就绪后缓存在内存，稳态不再调用 getprop）
-        if [ "$boot_completed_cached" != "1" ]; then
-            boot_ok=$(getprop sys.boot_completed 2>/dev/null)
-            if [ -z "$boot_ok" ] || [ "$boot_ok" = "1" ]; then
+        if [ "$boot_completed_cached" != "1" ] || [ "$soft_reboot_pending" -eq 1 ]; then
+            if is_system_ready_after_soft_reboot "$soft_reboot_reason"; then
                 boot_completed_cached="1"
                 if [ "$NETD_TRACKING_ACTIVE" -eq 0 ]; then
                     resolve_netd_pid || true
@@ -2398,11 +2482,10 @@ if [ "$1" = "--watchdog" ]; then
             need_repair="${soft_reboot_reason:-soft-reboot}"
         fi
 
-        # 软重启就绪门控：捕获到 netd/system_server 重启时若系统尚在重启途中，等 sys.boot_completed=1 后再修，防止中途抢跑重挂被覆盖
+        # 软重启就绪门控：捕获到 netd/system_server 重启时若系统或新 system_server 尚在重启途中，切轻轮询等就绪后再修
         if [ "$need_repair" = "netd-restarted" ] || [ "$need_repair" = "soft-reboot" ]; then
             if [ "$soft_reboot_pending" -eq 0 ]; then
-                _sr_boot=$(getprop sys.boot_completed 2>/dev/null)
-                if [ -n "$_sr_boot" ] && [ "$_sr_boot" != "1" ]; then
+                if ! is_system_ready_after_soft_reboot "$need_repair"; then
                     boot_completed_cached=""
                     soft_reboot_pending=1
                     soft_reboot_reason="$need_repair"
@@ -2415,9 +2498,15 @@ if [ "$1" = "--watchdog" ]; then
             soft_reboot_wait_loops=0
         fi
 
-        # 软重启恢复后的下一轮执行一次性防余震复检（防止 ConnectivityService 延迟完成覆写规则）
-        if [ -z "$need_repair" ] && [ "$post_reboot_recheck" -eq 1 ]; then
-            post_reboot_recheck=0
+        # 软重启恢复后连续两轮执行防余震复检（覆盖 +60s 与 +120s 的 ConnectivityService 延迟洗表并补刷 PID 追踪）
+        if [ -z "$need_repair" ] && [ "$post_reboot_recheck" -gt 0 ]; then
+            post_reboot_recheck=$((post_reboot_recheck - 1))
+            if [ "$NETD_TRACKING_ACTIVE" -eq 0 ]; then
+                resolve_netd_pid || true
+            fi
+            if [ "$SYS_SERVER_TRACKING_ACTIVE" -eq 0 ]; then
+                resolve_sys_server_pid || true
+            fi
             if ! agh_core_healthy "$redir_port"; then
                 need_repair="post-reboot-core-unhealthy"
             elif ! nat_rules_healthy; then
@@ -2498,7 +2587,7 @@ if [ "$1" = "--watchdog" ]; then
                     backoff_remaining=0
                     last_failed_reason=""
                     if [ "$need_repair" = "soft-reboot" ] || [ "$need_repair" = "netd-restarted" ]; then
-                        post_reboot_recheck=1
+                        post_reboot_recheck=2
                     fi
                 else
                     fail_streak=$((fail_streak + 1))
@@ -2635,12 +2724,12 @@ fi
 # ==============================================================================
 find "$ADGPATH" "$SCRIPT_DIR" -type f -name "*.sh" -exec chattr -i {} \; 2>/dev/null
 
-# 检查冲突的 hosts 模块并中止启动
+# 检查冲突的 hosts 模块并中止启动（绝不擅自修改或删除用户的其他模块）
 found_hosts=false
 for module in "$MODULES_DIR"/*; do
     [ -d "$module" ] && [ -f "$module/system/etc/hosts" ] && {
         found_hosts=true
-        touch "$module/remove"
+        break
     }
 done
 if [ "$found_hosts" = true ]; then
@@ -2658,6 +2747,18 @@ if is_manually_stopped; then
     disarm_nat_safety_valve >/dev/null 2>&1 || true
     start_singleton_watchdog
     exit 0
+fi
+
+# 开机自动触发入口先等待 sys.boot_completed=1 就绪，防止框架未初始化完毕前重复挂载
+if [ -z "${1:-}" ]; then
+    _boot_wait_loops=0
+    _boot_wait_max="${AGH_BOOT_WAIT_MAX_LOOPS:-25}"
+    while [ "$_boot_wait_loops" -lt "$_boot_wait_max" ]; do
+        _boot_done=$(getprop sys.boot_completed 2>/dev/null)
+        [ -z "$_boot_done" ] || [ "$_boot_done" = "1" ] && break
+        safe_sleep 1 || break
+        _boot_wait_loops=$((_boot_wait_loops + 1))
+    done
 fi
 
 ensure_private_dns_off

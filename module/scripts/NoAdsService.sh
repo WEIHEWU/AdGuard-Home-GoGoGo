@@ -5,11 +5,17 @@
 LOCK_DIR="/data/adb/agh/cache_clean.lock"
 LAST_TIME_FILE="/data/adb/agh/last_clean_time"
 
-# 1. 内核级原子互斥锁（避免极端环境下并发争抢）
+# 1. 内核级原子互斥锁（带陈旧锁 PID 校验防断电/强杀残留死锁）
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    exit 0
+    _old_lock_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+    if [ -n "$_old_lock_pid" ] && kill -0 "$_old_lock_pid" 2>/dev/null; then
+        exit 0
+    fi
+    rm -rf "$LOCK_DIR" 2>/dev/null
+    mkdir "$LOCK_DIR" 2>/dev/null || exit 0
 fi
-trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+printf '%s\n' "$$" > "$LOCK_DIR/pid" 2>/dev/null
+trap 'rm -rf "$LOCK_DIR" 2>/dev/null' EXIT
 
 # 2. 60秒时间戳防抖冷却（避免用户短时间连续误触导致重复读写闪存）
 NOW=$(date +%s)

@@ -30,10 +30,10 @@
 ## ✨ 核心架构与优化亮点
 
 1. **`nsenter -G 23333` 专属进程组隔离 + 零自吞噬防回环**：
-   - 统一采用 `nsenter -G 23333 -t 1` 启动 `AdGuardHome` 核心（`v2026-11-07`），将核心流量（`uid=0, gid=23333`）与安卓系统 `netd`（`uid=0, gid=0`）在内核层彻底物理隔离；
+   - 统一采用 `nsenter -G 23333 -t 1` 启动 `AdGuardHome` 核心（`v2026-11-25`），将核心流量（`uid=0, gid=23333`）与安卓系统 `netd`（`uid=0, gid=0`）在内核层彻底物理隔离；
    - 无论当前 Wi-Fi 或 VPN 的系统 DNS 是否与上游 IP（如 `1.1.1.1` / `8.8.8.8` / `223.5.5.5`）重合，均能 100% 拦截系统 DNS 请求且绝不发生核心自吞噬回环。
 2. **首包级低功耗 `mangle` 表 SNI 嗅探 (`AGH_SNI`) + 局域网免检直通 + 零 `sysctl` 侵入**：
-   - 在 `iptables -t mangle` / `ip6tables -t mangle` 挂载 `AGH_SNI` 链，优先探测内核 `connbytes` 支持（`--connbytes 1:4 --connbytes-dir original --connbytes-mode packets -j NFQUEUE --queue-num 0 --queue-bypass`，不支持时自动回退标准 `443` `NFQUEUE`），仅检查 TLS 握手前 4 个数据包且强制 `--queue-bypass` 零断流，**全程严禁修改任何 `sysctl` 内核参数**；
+   - 在 `iptables -t mangle` / `ip6tables -t mangle` 挂载 `AGH_SNI` 链，优先探测内核 `connbytes` 支持（`--connbytes 1:8 --connbytes-dir original --connbytes-mode packets -j NFQUEUE --queue-num 0 --queue-bypass`，不支持时自动回退标准 `443/8443` `NFQUEUE`），仅检查 TLS 握手前 8 个数据包且强制 `--queue-bypass` 零断流，**全程严禁修改任何 `sysctl` 内核参数**；
    - 在 `AGH_SNI` 与 `ADGUARD_DOT` 顶层全协议豁免核心自身（`--gid-owner 23333`）与局域网私有网段（`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` 及 IPv6 `fc00::/7`, `fe80::/10`），完美访问局域网 NAS、投影仪、TVBox 及非标端口 HTTP 服务。
 3. **分应用白名单内核级直通 (`App Allowlist`)**：
    - 在配套管理器中勾选任意应用加入白名单后，[`iptables.sh`](module/scripts/iptables.sh) 直接在内核 `ADGUARD`、`ADGUARD6_NAT`、`ADGUARD_DOT`、`AGH_SNI` 四条链顶层通过 `-m owner --uid-owner` 精准放行该应用流量，零后台轮询、零发热且不影响其他应用的去广告保护。
@@ -61,7 +61,7 @@
 
 ```bash
 chmod +x build.sh
-./build.sh 20261116.1
+./build.sh 20261125.1
 ```
 
 ## 维护与开源
