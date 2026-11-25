@@ -50,13 +50,13 @@ if [ -n "$BB_BIN" ]; then
 fi
 
 safe_sleep() {
-    if sleep "$1" >/dev/null 2>&1; then
+    if sleep "$1" >/dev/null 2>&1 7>&- 8>&- 9>&-; then
         return 0
-    elif [ -n "$BB_BIN" ] && "$BB_BIN" sleep "$1" >/dev/null 2>&1; then
+    elif [ -n "$BB_BIN" ] && "$BB_BIN" sleep "$1" >/dev/null 2>&1 7>&- 8>&- 9>&-; then
         return 0
-    elif [ -x /system/bin/toybox ] && /system/bin/toybox sleep "$1" >/dev/null 2>&1; then
+    elif [ -x /system/bin/toybox ] && /system/bin/toybox sleep "$1" >/dev/null 2>&1 7>&- 8>&- 9>&-; then
         return 0
-    elif [ -x /system/bin/toolbox ] && /system/bin/toolbox sleep "$1" >/dev/null 2>&1; then
+    elif [ -x /system/bin/toolbox ] && /system/bin/toolbox sleep "$1" >/dev/null 2>&1 7>&- 8>&- 9>&-; then
         return 0
     fi
     return 1
@@ -461,7 +461,7 @@ test_flock_candidate_3step() {
 
     w_rdy=0
     while [ ! -f "$probe_ready" ] && kill -0 "$p1_pid" 2>/dev/null && [ "$w_rdy" -lt 40 ]; do
-        safe_sleep 0.05 || sleep 1
+        safe_sleep 0.05 || sleep 1 7>&- 8>&- 9>&-
         w_rdy=$((w_rdy + 1))
     done
 
@@ -473,7 +473,7 @@ test_flock_candidate_3step() {
         : > "$probe_release" 2>/dev/null
         w_exit=0
         while kill -0 "$p1_pid" 2>/dev/null && [ "$w_exit" -lt 20 ]; do
-            safe_sleep 0.05 || sleep 1
+            safe_sleep 0.05 || sleep 1 7>&- 8>&- 9>&-
             w_exit=$((w_exit + 1))
         done
         kill -0 "$p1_pid" 2>/dev/null && kill -9 "$p1_pid" 2>/dev/null || true
@@ -509,7 +509,7 @@ test_flock_candidate_3step() {
     : > "$probe_release" 2>/dev/null
     w_exit=0
     while kill -0 "$p1_pid" 2>/dev/null && [ "$w_exit" -lt 20 ]; do
-        safe_sleep 0.05 || sleep 1
+        safe_sleep 0.05 || sleep 1 7>&- 8>&- 9>&-
         w_exit=$((w_exit + 1))
     done
     kill -0 "$p1_pid" 2>/dev/null && kill -9 "$p1_pid" 2>/dev/null || true
@@ -548,8 +548,55 @@ test_flock_candidate_3step() {
     return 1
 }
 
+try_reuse_parent_verified_flock() {
+    [ -n "${AGH_DIAG_VERIFIED_FLOCK_BIN:-}" ] || return 1
+    _r_kind=""
+    _r_bin=""
+    _r_sub=""
+    if [ -n "${FLOCK_BIN:-}" ] && [ -x "$FLOCK_BIN" ]; then
+        _r_kind="custom"; _r_bin="$FLOCK_BIN"; _r_sub=""
+    elif [ -n "${BB_BIN:-}" ] && [ -x "$BB_BIN" ]; then
+        _r_kind="busybox"; _r_bin="$BB_BIN"; _r_sub="flock"
+    else
+        _r_sys=$(command -v flock 2>/dev/null || true)
+        if [ -n "$_r_sys" ] && [ -x "$_r_sys" ]; then
+            _r_kind="system"; _r_bin="$_r_sys"; _r_sub=""
+        else
+            _r_tb="/system/bin/toybox"
+            [ -x "$_r_tb" ] || _r_tb=$(command -v toybox 2>/dev/null || true)
+            if [ -n "$_r_tb" ] && [ -x "$_r_tb" ]; then
+                _r_kind="toybox"; _r_bin="$_r_tb"; _r_sub="flock"
+            fi
+        fi
+    fi
+    [ -n "$_r_bin" ] || return 1
+    [ "$_r_bin" = "${AGH_DIAG_VERIFIED_FLOCK_BIN:-}" ] || return 1
+    [ "$_r_sub" = "${AGH_DIAG_VERIFIED_FLOCK_SUBCMD:-}" ] || return 1
+
+    _r_target=$(resolve_symlink_target "$_r_bin")
+    _r_impl=$(detect_flock_impl_source "$_r_kind" "$_r_bin" "$_r_target")
+    if [ -n "$_r_sub" ]; then
+        _r_cmd="${_r_bin} ${_r_sub} -n 0 0<&FD"
+    else
+        _r_cmd="${_r_bin} -n 0 0<&FD"
+    fi
+
+    FLOCK_VERIFIED=1
+    FLOCK_RESOLVED_KIND="$_r_kind"
+    FLOCK_RESOLVED_BIN="$_r_bin"
+    FLOCK_RESOLVED_TARGET="$_r_target"
+    FLOCK_RESOLVED_SUBCMD="$_r_sub"
+    FLOCK_RESOLVED_IMPL="$_r_impl"
+    FLOCK_RESOLVED_CMD_STR="$_r_cmd"
+    FLOCK_VERIFY_STEPS="${AGH_DIAG_VERIFIED_FLOCK_STEPS:-step1=0,step2=1,step3=0}"
+    return 0
+}
+
 verify_flock_support() {
     [ "$FLOCK_VERIFIED" = "1" ] && return 0
+    if [ -n "${AGH_DIAG_VERIFIED_FLOCK_BIN:-}" ] && try_reuse_parent_verified_flock; then
+        return 0
+    fi
     FLOCK_LAST_DIAG=""
 
     if [ -n "${FLOCK_BIN:-}" ] && [ -x "$FLOCK_BIN" ]; then
@@ -757,7 +804,7 @@ acquire_op_lock() {
         if safe_sleep 0.2; then
             waited=$((waited + 1))
         else
-            sleep 1
+            sleep 1 7>&- 8>&- 9>&-
             waited=$((waited + 5))
         fi
     done
@@ -791,7 +838,7 @@ terminate_active_child() {
             kill -TERM "$cpid" 2>/dev/null || true
             for _w in 1 2 3 4 5 6 7 8 9 10; do
                 kill -0 "$cpid" 2>/dev/null || break
-                safe_sleep 0.1 || sleep 1
+                safe_sleep 0.1 || sleep 1 7>&- 8>&- 9>&-
             done
             kill -0 "$cpid" 2>/dev/null && kill -KILL "$cpid" 2>/dev/null || true
             wait "$cpid" 2>/dev/null || true
@@ -1149,8 +1196,8 @@ should_takeover_vpn_dns() {
         return 0
     fi
 
-    op_country=$(getprop gsm.operator.iso-country 2>/dev/null | tr 'A-Z' 'a-z')
-    op_mcc=$(getprop gsm.operator.numeric 2>/dev/null)
+    op_country=$(getprop gsm.operator.iso-country 2>/dev/null 7>&- 8>&- 9>&- | tr 'A-Z' 'a-z')
+    op_mcc=$(getprop gsm.operator.numeric 2>/dev/null 7>&- 8>&- 9>&-)
     in_mainland_cn=0
     [ "${RUN_MODE:-overseas}" = "cn" ] && in_mainland_cn=1
     case "$op_country" in
@@ -1444,11 +1491,11 @@ clean_all_rules() {
 refresh_network() {
     flushed=0
     if command -v ndc >/dev/null 2>&1; then
-        ndc resolver flushenv >/dev/null 2>&1 && flushed=1
-        ndc resolver flushdefaultif >/dev/null 2>&1 && flushed=1
+        ndc resolver flushenv >/dev/null 2>&1 7>&- 8>&- 9>&- && flushed=1
+        ndc resolver flushdefaultif >/dev/null 2>&1 7>&- 8>&- 9>&- && flushed=1
     fi
     if command -v cmd >/dev/null 2>&1; then
-        cmd netd resolver flushdefaultif >/dev/null 2>&1 && flushed=1
+        cmd netd resolver flushdefaultif >/dev/null 2>&1 7>&- 8>&- 9>&- && flushed=1
     fi
     [ "$flushed" -eq 1 ] && return 0
     return 1
@@ -1459,12 +1506,12 @@ preflight_check() {
     load_runtime_config
     for i in 1 2 3 4 5 6 7 8 9 10; do
         if agh_core_healthy "$redir_port"; then
-            agh_real_pid=$(pidof AdGuardHome 2>/dev/null | awk '{print $1}')
+            agh_real_pid=$(pidof AdGuardHome 2>/dev/null 7>&- 8>&- 9>&- | awk '{print $1}')
             [ -n "$agh_real_pid" ] && echo "$agh_real_pid" > "$PID_FILE" 2>/dev/null
             echo "$(date '+%F %T') [PRE-FLIGHT] 本地 DNS 端口 ($redir_port UDP+TCP) 就绪，执行规则接管。" >> "$MAIN_LOG" 2>/dev/null
             return 0
         fi
-        sleep 0.2 2>/dev/null || sleep 1
+        sleep 0.2 2>/dev/null 7>&- 8>&- 9>&- || sleep 1 7>&- 8>&- 9>&-
     done
     clean_all_rules
     echo "$(date '+%F %T') [WARNING] AdGuardHome 未存活或端口 ($redir_port) 未完整监听，已触发防断网安全阀卸载 NAT 规则！" >> "$MAIN_LOG" 2>/dev/null
@@ -1501,10 +1548,10 @@ case "${1:-}" in
         clean_legacy_conflicts
         cleanup_ok=0
         clean_all_rules && cleanup_ok=1
-        if pidof AdGuardHome >/dev/null 2>&1; then
-            killall -15 AdGuardHome 2>/dev/null
-            sleep 1
-            pidof AdGuardHome >/dev/null 2>&1 && killall -9 AdGuardHome 2>/dev/null
+        if pidof AdGuardHome >/dev/null 2>&1 7>&- 8>&- 9>&-; then
+            killall -15 AdGuardHome 2>/dev/null 7>&- 8>&- 9>&-
+            sleep 1 7>&- 8>&- 9>&-
+            pidof AdGuardHome >/dev/null 2>&1 7>&- 8>&- 9>&- && killall -9 AdGuardHome 2>/dev/null 7>&- 8>&- 9>&-
         fi
         rm -f "$PID_FILE" 2>/dev/null
         dns_flushed=0

@@ -61,7 +61,7 @@
 
 ```bash
 chmod +x build.sh
-./build.sh 20261125.1
+./build.sh 20261125.2
 ```
 
 ## 维护与开源

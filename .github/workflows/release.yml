@@ -24,7 +24,7 @@ jobs:
         run: |
           case "${GITHUB_REF_NAME:-}" in
             v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
-            *)  VERSION_TAG="v20261125.1" ;;
+            *)  VERSION_TAG="v20261125.2" ;;
           esac
           VERSION_DATE="${VERSION_TAG#v}"
           case "$VERSION_TAG" in
@@ -56,23 +56,18 @@ jobs:
           body: |
             ### AdGuard Home GoGoGo `${{ env.VERSION_TAG }}`
 
-            全设备级满血 DNS + SNI (`443/8443`) 双引擎去广告防火墙模块正式版，内置 **[AdGuard-Home-GoGoGo-Core v2026-11-25](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core/releases/tag/v2026-11-25)** 与 **[AdGuard-Home-GoGoGo-Manager v2.24.29](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager/releases/tag/v2.24.29)**：
+            全设备级满血 DNS + SNI (`443/8443`) 双引擎去广告防火墙模块维护更新版，内置 **[AdGuard-Home-GoGoGo-Core v2026-11-25](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core/releases/tag/v2026-11-25)**（无变动复用）与 **[AdGuard-Home-GoGoGo-Manager v2.24.30](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager/releases/tag/v2.24.30)**：
 
             - **Core (`v2026-11-25`)**: `12,320,892 B` · SHA-256 `d7b639ac111843afc5d6ed1e3cbf169c58f28740751909e4a6540aa4d9bdcda4`
-            - **Manager (`v2.24.29+199`)**: `8,873,878 B` · SHA-256 `d30e2725483f3d2420259efaaf2b867c55a6f86e3e86f1bae784718d02ad5640`
+            - **Manager (`v2.24.30+200`)**: `8,873,778 B` · SHA-256 `63994361c46e857c4321fca3cb002529debedbb37c60f084cb16ad9654b07663`
 
-            #### 本次正式版更新亮点
-            1. **SNI 与核心稳定性加固 (`Core v2026-11-25`)**：
-               - SNI `NFQUEUE`（`queue_num=0`）`queueReadTimeout` 调整为 `2s` 并启用 `1 MiB` `SO_RCVBUF` 与退避重连，大幅降低空闲唤醒并保证退出可控；区分可恢复 `ENOBUFS` 与真实断连、捕获 `handlePacket` panic、修复退出唤醒读写时序；
-               - 修复规则定时更新与 `/control/filtering/refresh` 并发锁、`dialcontext`/Android `RootCAs` 与 DoH 上游回环路径、运行时 `core_crash.log` 512 KiB 有界轮转；
-               - 彻底移除强制 `SetMemoryLimit` / `SetGCPercent` 人为上限，恢复 Go 官方默认 GC 与内存调度，避免高规则/大查询下的抖动。
-            2. **软重启零抖动、高省电与 `--diag-flock` 修复 (`Module`)**：
-               - `customize.sh` 覆盖刷入先幂等容错卸载旧链，零中断平滑升级并支持极速停进程与单向增量备份；
-               - `service.sh --watchdog` 两级哨兵实测 1.5 小时仅约 2 秒 CPU：纯 Shell `/proc` 快速层、`is_system_ready_after_soft_reboot`（`sys.boot_completed` + `init.svc.zygote` + `system_server` PID 就绪门控 + 一次性防余震复检）、僵尸态 `State: Z/X` 精准剔除、`ADGUARD6_NAT` GID 与 `--connbytes 1:8` 双链完整性核验、以及按全仓 `/apex` + `/system` + `/data` 最大 mtime 构建 Conscrypt CA 包；
-               - 修复 `service.sh --diag-flock` 子进程测试管道句柄未关闭与 `/proc` 全量 fork 阻塞问题，确保诊断包全 8 项采集快速完整返回 `ok`。
-            3. **诊断包公共 `Download` 导出与本地时间命名 (`Manager v2.24.29`)**：
-               - 诊断包默认同步保存至系统公共 `Download/agh_diag_YYYYMMDD_HHMMSS_xxxx.zip`（设备本地时间命名，同时在 manifest 保留 UTC 与带偏移本地时间），弹窗明确展示保存路径并保留系统分享入口；
-               - 聚合日志点击详情内新增一键放行/拦截入口（保持日志列表行布局紧凑无改动），并全面加固 `su` 超时进程回收、`restoreFactoryUserRules` 失败防清空与端口同步。
+            #### 本次维护版更新（真机全 8 项诊断全绿通过）
+            1. **阻断看门狗与操作锁的子进程 FD 继承 (`fd 7/8/9`)**：在 [service.sh](module/service.sh)、[iptables.sh](module/scripts/iptables.sh) 与 [switch_mode.sh](module/scripts/switch_mode.sh) 的 `safe_sleep()`、回退 `sleep 1` 及持锁期外部命令统一显式关闭 `7>&- 8>&- 9>&-`，消除 `sleep 60` 等子进程意外继承 `agh_watchdog.flock` / `agh_op.flock` 的隐患。
+            2. **重构 `--diag-flock` `FD_LEAK_CHECK` 与放行 `mksh` 高位暂存 FD**：
+               - 弃用进程名白名单，通过临时软链接实测 `-lname` 能力并显式优先采用 `/system/bin/find` / `/system/bin/toybox find`（主动避开不支持 `-lname` 的 BusyBox `find`），仅对命中的 PID 查询 `exe`/`cmdline`；极少数不支持 `-lname` 的 ROM 自动降级为单次 `ls -ln ... | awk` 兜底，绝不静默漏检；
+               - 对确认身份的合法看门狗主进程（`role=watchdog` + `wd_pid_match=yes`）仅持有单个 `fd=8` 或 `mksh` 临时暂存高位描述符（`fd >= 10`）时准确放行判定 `WATCHDOG_LOCK_OK`，多 FD 或非看门狗进程一律严格报 `FD_LEAK_DETECTED`。
+            3. **三脚本 `--diag-flock` 锁自检去重**：主脚本完成 3 步并发锁实测后向 `switch_mode.sh` / `iptables.sh` 透传已验证工具信息，工具路径与参数一致时免重复等待直接复用 `PASS`（不一致时补跑完整 3 步实测）。
+            4. **Manager `04_lock_diagnostics.txt` 提速 (`Manager v2.24.30`)**：将逐个 FD `readlink` 重构为单次 `ls -ln /proc/$p/fd | grep -E 'agh_|flock'`，真机导出 8 项全部返回 `ok`（`partial_success: false`）。
           files: |
             releases/AdGuard_Home_gogogo_${{ env.VERSION_DATE }}.zip
             releases/AdGuardHomeManager.apk

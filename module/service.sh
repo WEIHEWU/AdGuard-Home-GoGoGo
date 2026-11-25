@@ -58,15 +58,15 @@ if [ -n "$BB_BIN" ]; then
     command -v killall >/dev/null 2>&1 || killall() { "$BB_BIN" killall "$@"; }
 fi
 
-# 兼容第三方魔改 ROM 的安全休眠封装
+# 兼容第三方魔改 ROM 的安全休眠封装（显式关闭锁 FD 7/8/9，杜绝 sleep 子进程继承看门狗或操作锁）
 safe_sleep() {
-    if sleep "$1" >/dev/null 2>&1; then
+    if sleep "$1" >/dev/null 2>&1 7>&- 8>&- 9>&-; then
         return 0
-    elif [ -n "$BB_BIN" ] && "$BB_BIN" sleep "$1" >/dev/null 2>&1; then
+    elif [ -n "$BB_BIN" ] && "$BB_BIN" sleep "$1" >/dev/null 2>&1 7>&- 8>&- 9>&-; then
         return 0
-    elif [ -x /system/bin/toybox ] && /system/bin/toybox sleep "$1" >/dev/null 2>&1; then
+    elif [ -x /system/bin/toybox ] && /system/bin/toybox sleep "$1" >/dev/null 2>&1 7>&- 8>&- 9>&-; then
         return 0
-    elif [ -x /system/bin/toolbox ] && /system/bin/toolbox sleep "$1" >/dev/null 2>&1; then
+    elif [ -x /system/bin/toolbox ] && /system/bin/toolbox sleep "$1" >/dev/null 2>&1 7>&- 8>&- 9>&-; then
         return 0
     fi
     return 1
@@ -482,7 +482,7 @@ test_flock_candidate_3step() {
 
     w_rdy=0
     while [ ! -f "$probe_ready" ] && kill -0 "$p1_pid" 2>/dev/null && [ "$w_rdy" -lt 40 ]; do
-        safe_sleep 0.05 || sleep 1
+        safe_sleep 0.05 || sleep 1 7>&- 8>&- 9>&-
         w_rdy=$((w_rdy + 1))
     done
 
@@ -494,7 +494,7 @@ test_flock_candidate_3step() {
         : > "$probe_release" 2>/dev/null
         w_exit=0
         while kill -0 "$p1_pid" 2>/dev/null && [ "$w_exit" -lt 20 ]; do
-            safe_sleep 0.05 || sleep 1
+            safe_sleep 0.05 || sleep 1 7>&- 8>&- 9>&-
             w_exit=$((w_exit + 1))
         done
         kill -0 "$p1_pid" 2>/dev/null && kill -9 "$p1_pid" 2>/dev/null || true
@@ -532,7 +532,7 @@ test_flock_candidate_3step() {
     : > "$probe_release" 2>/dev/null
     w_exit=0
     while kill -0 "$p1_pid" 2>/dev/null && [ "$w_exit" -lt 20 ]; do
-        safe_sleep 0.05 || sleep 1
+        safe_sleep 0.05 || sleep 1 7>&- 8>&- 9>&-
         w_exit=$((w_exit + 1))
     done
     kill -0 "$p1_pid" 2>/dev/null && kill -9 "$p1_pid" 2>/dev/null || true
@@ -647,7 +647,7 @@ terminate_active_child() {
             kill -15 "$target_child" 2>/dev/null || true
             c_wait=0
             while [ "$c_wait" -lt 20 ] && kill -0 "$target_child" 2>/dev/null; do
-                safe_sleep 0.1 || sleep 1
+                safe_sleep 0.1 || sleep 1 7>&- 8>&- 9>&-
                 c_wait=$((c_wait + 1))
             done
             if kill -0 "$target_child" 2>/dev/null; then
@@ -864,7 +864,7 @@ acquire_op_lock() {
         if safe_sleep 0.2; then
             waited=$((waited + 1))
         else
-            sleep 1
+            sleep 1 7>&- 8>&- 9>&-
             waited=$((waited + 5))
         fi
     done
@@ -952,15 +952,15 @@ load_runtime_config() {
 # 系统「私人 DNS (Private DNS / DoT 853)」状态备份、自动关闭防逃逸与无损恢复闭环
 PRIV_DNS_BAK="$AGH_DIR/private_dns.bak"
 ensure_private_dns_off() {
-    cur_mode=$(settings get global private_dns_mode 2>/dev/null)
+    cur_mode=$(settings get global private_dns_mode 2>/dev/null 7>&- 8>&- 9>&-)
     case "$cur_mode" in
         ''|null|off) return 0 ;;
     esac
     if [ ! -f "$PRIV_DNS_BAK" ]; then
-        cur_spec=$(settings get global private_dns_specifier 2>/dev/null)
+        cur_spec=$(settings get global private_dns_specifier 2>/dev/null 7>&- 8>&- 9>&-)
         printf 'mode=%s\nspec=%s\n' "$cur_mode" "$cur_spec" > "$PRIV_DNS_BAK" 2>/dev/null
     fi
-    settings put global private_dns_mode off >/dev/null 2>&1
+    settings put global private_dns_mode off >/dev/null 2>&1 7>&- 8>&- 9>&-
 }
 
 restore_private_dns() {
@@ -968,10 +968,10 @@ restore_private_dns() {
     bak_mode=$(sed -n 's/^mode=//p' "$PRIV_DNS_BAK" 2>/dev/null | head -n 1)
     bak_spec=$(sed -n 's/^spec=//p' "$PRIV_DNS_BAK" 2>/dev/null | head -n 1)
     if [ -n "$bak_mode" ] && [ "$bak_mode" != "null" ]; then
-        settings put global private_dns_mode "$bak_mode" >/dev/null 2>&1
+        settings put global private_dns_mode "$bak_mode" >/dev/null 2>&1 7>&- 8>&- 9>&-
     fi
     if [ -n "$bak_spec" ] && [ "$bak_spec" != "null" ]; then
-        settings put global private_dns_specifier "$bak_spec" >/dev/null 2>&1
+        settings put global private_dns_specifier "$bak_spec" >/dev/null 2>&1 7>&- 8>&- 9>&-
     fi
     rm -f "$PRIV_DNS_BAK" 2>/dev/null
 }
@@ -980,8 +980,8 @@ restore_private_dns() {
 clean_deleted_app_dirs() {
     for d in /data/data/*==deleted== /data/user/0/*==deleted== /data/user/*/*==deleted==; do
         if [ -d "$d" ]; then
-            chattr -R -i "$d" 2>/dev/null
-            rm -rf "$d" 2>/dev/null
+            chattr -R -i "$d" 2>/dev/null 7>&- 8>&- 9>&-
+            rm -rf "$d" 2>/dev/null 7>&- 8>&- 9>&-
         fi
     done
 }
@@ -1080,30 +1080,30 @@ agh_running() {
 # 内部函数（假定调用者已持有操作锁）
 stop_agh_wait() {
     has_op_lock_context || return 1
-    if pidof AdGuardHome >/dev/null 2>&1; then
-        killall -15 AdGuardHome 2>/dev/null || {
-            for p in $(pidof AdGuardHome 2>/dev/null); do kill -15 "$p" 2>/dev/null; done
+    if pidof AdGuardHome >/dev/null 2>&1 7>&- 8>&- 9>&-; then
+        killall -15 AdGuardHome 2>/dev/null 7>&- 8>&- 9>&- || {
+            for p in $(pidof AdGuardHome 2>/dev/null 7>&- 8>&- 9>&-); do kill -15 "$p" 2>/dev/null; done
         }
         if safe_sleep 0.1; then
             w=0
             while [ "$w" -lt 20 ]; do
-                pidof AdGuardHome >/dev/null 2>&1 || break
+                pidof AdGuardHome >/dev/null 2>&1 7>&- 8>&- 9>&- || break
                 safe_sleep 0.1
                 w=$((w + 1))
             done
         else
             w=0
             while [ "$w" -lt 2 ]; do
-                pidof AdGuardHome >/dev/null 2>&1 || break
-                sleep 1
+                pidof AdGuardHome >/dev/null 2>&1 7>&- 8>&- 9>&- || break
+                sleep 1 7>&- 8>&- 9>&-
                 w=$((w + 1))
             done
         fi
-        if pidof AdGuardHome >/dev/null 2>&1; then
-            killall -9 AdGuardHome 2>/dev/null || {
-                for p in $(pidof AdGuardHome 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
+        if pidof AdGuardHome >/dev/null 2>&1 7>&- 8>&- 9>&-; then
+            killall -9 AdGuardHome 2>/dev/null 7>&- 8>&- 9>&- || {
+                for p in $(pidof AdGuardHome 2>/dev/null 7>&- 8>&- 9>&-); do kill -9 "$p" 2>/dev/null; done
             }
-            safe_sleep 0.3 || sleep 1
+            safe_sleep 0.3 || sleep 1 7>&- 8>&- 9>&-
         fi
     fi
     rm -f "$PID_FILE" 2>/dev/null
@@ -1210,11 +1210,11 @@ disarm_nat_safety_valve() {
 flush_dns_cache() {
     flushed_any=0
     if command -v ndc >/dev/null 2>&1; then
-        ndc resolver flushenv >/dev/null 2>&1 && flushed_any=1
-        ndc resolver flushdefaultif >/dev/null 2>&1 && flushed_any=1
+        ndc resolver flushenv >/dev/null 2>&1 7>&- 8>&- 9>&- && flushed_any=1
+        ndc resolver flushdefaultif >/dev/null 2>&1 7>&- 8>&- 9>&- && flushed_any=1
     fi
     if command -v cmd >/dev/null 2>&1; then
-        cmd netd resolver flushdefaultif >/dev/null 2>&1 && flushed_any=1
+        cmd netd resolver flushdefaultif >/dev/null 2>&1 7>&- 8>&- 9>&- && flushed_any=1
     fi
     [ "$flushed_any" -eq 1 ]
 }
@@ -1355,9 +1355,9 @@ verify_or_restore_yaml() {
         fi
     fi
     if [ -x "$BIN_DIR/AdGuardHome" ]; then
-        "$BIN_DIR/AdGuardHome" --version >/dev/null 2>&1
+        "$BIN_DIR/AdGuardHome" --version >/dev/null 2>&1 7>&- 8>&- 9>&-
         if [ $? -eq 0 ]; then
-            "$BIN_DIR/AdGuardHome" --check-config -c "$check_f" -w "$BIN_DIR" >/dev/null 2>&1 || return 1
+            "$BIN_DIR/AdGuardHome" --check-config -c "$check_f" -w "$BIN_DIR" >/dev/null 2>&1 7>&- 8>&- 9>&- || return 1
         fi
     fi
     return 0
@@ -1471,7 +1471,7 @@ ensure_agh_started() {
             redir_port="$R1"
         fi
 
-        AGH_TZ="$(getprop persist.sys.timezone 2>/dev/null)"
+        AGH_TZ="$(getprop persist.sys.timezone 2>/dev/null 7>&- 8>&- 9>&-)"
         [ -n "$AGH_TZ" ] && export TZ="$AGH_TZ"
         export SSL_CERT_DIR="/system/etc/security/cacerts/"
         [ -s "$CA_BUNDLE" ] && export SSL_CERT_FILE="$CA_BUNDLE"
@@ -1506,7 +1506,7 @@ ensure_agh_started() {
                     ready=1
                     break
                 fi
-                sleep 1
+                sleep 1 7>&- 8>&- 9>&-
                 step=$((step + 1))
             done
         fi
@@ -1836,12 +1836,12 @@ resolve_proc_pid_by_comm() {
     fi
 
     if [ -z "$_rpb_p" ] && [ -n "$_rpb_prop_name" ]; then
-        _rpb_p=$(getprop "$_rpb_prop_name" 2>/dev/null || true)
+        _rpb_p=$(getprop "$_rpb_prop_name" 2>/dev/null 7>&- 8>&- 9>&- || true)
         is_pid_alive_fast "$_rpb_p" "$_rpb_comm_target" || _rpb_p=""
     fi
 
     if [ -z "$_rpb_p" ]; then
-        for _rpb_cand in $(pidof "$_rpb_comm_target" 2>/dev/null); do
+        for _rpb_cand in $(pidof "$_rpb_comm_target" 2>/dev/null 7>&- 8>&- 9>&-); do
             if is_pid_alive_fast "$_rpb_cand" "$_rpb_comm_target"; then
                 _rpb_p="$_rpb_cand"
                 break
@@ -1941,7 +1941,7 @@ start_singleton_watchdog() {
         if [ -s "$WATCHDOG_PID_FILE" ] && watchdog_alive; then
             break
         fi
-        safe_sleep 0.05 || sleep 1
+        safe_sleep 0.05 || sleep 1 7>&- 8>&- 9>&-
         _wd_wait=$((_wd_wait + 1))
     done
 }
@@ -1949,6 +1949,227 @@ start_singleton_watchdog() {
 # ==============================================================================
 # 只读 flock 诊断接口 (--diag-flock)：零修改正式锁、YAML、config.prop 或防火墙
 # ==============================================================================
+# 仅对命中锁 FD 的 PID 读取 /proc/<pid> 并判定精确角色（不依赖进程名预筛）
+classify_proc_role_for_pid() {
+    _cp_pid="$1"
+    PROC_ROLE="unknown"
+    PROC_WD_PID_MATCH="n/a"
+    _pdir="$PROC_DIR/$_cp_pid"
+    [ -d "$_pdir" ] || return 1
+
+    _cr_char=$(printf '\r')
+    _p_comm=""
+    [ -r "$_pdir/comm" ] && { IFS= read -r _p_comm < "$_pdir/comm" 2>/dev/null || true; }
+    _p_comm="${_p_comm%$_cr_char}"
+
+    _p_exe=""
+    if [ -L "$_pdir/exe" ] || [ -e "$_pdir/exe" ]; then
+        _p_exe=$(readlink -f "$_pdir/exe" 2>/dev/null || readlink "$_pdir/exe" 2>/dev/null || true)
+    fi
+    _p_exe_clean="${_p_exe% (deleted)}"
+    _cmdline_lines=""
+    [ -r "$_pdir/cmdline" ] && _cmdline_lines=$( { tr '\000' '\n' < "$_pdir/cmdline"; } 2>/dev/null || true )
+    [ -d "$_pdir" ] || return 1
+
+    if [ -z "$_p_exe_clean" ] && [ -z "$_p_comm" ] && [ -z "$_cmdline_lines" ]; then
+        return 0
+    fi
+
+    _role=""
+    if [ -n "$_p_exe_clean" ]; then
+        if [ "$_p_exe_clean" = "$core_bin" ] || [ "$_p_exe_clean" = "$core_bin_real" ]; then
+            _role="core"
+        else
+            case "$_p_exe_clean" in
+                */bin/AdGuardHome|*/AdGuardHome)
+                    if [ -z "$_p_comm" ] || [ "$_p_comm" = "AdGuardHome" ]; then
+                        _role="core"
+                    fi
+                    ;;
+            esac
+        fi
+    elif [ ! -e "$_pdir/exe" ] && [ ! -L "$_pdir/exe" ]; then
+        _argv0="${_cmdline_lines%%
+*}"
+        if [ "$_p_comm" = "AdGuardHome" ]; then
+            case "$_argv0" in
+                AdGuardHome|*/AdGuardHome) _role="core" ;;
+            esac
+        fi
+    fi
+
+    if [ -z "$_role" ] && [ -n "$_cmdline_lines" ]; then
+        _is_wd_script=0
+        _has_wd_flag=0
+        _is_proxy_cfg=0
+        _is_noads=0
+        _is_op_script=0
+        _is_diag_flag=0
+        _old_ifs="$IFS"
+        IFS='
+'
+        for _arg in $_cmdline_lines; do
+            case "$_arg" in
+                service.sh|*/service.sh) _is_wd_script=1; _is_op_script=1 ;;
+                switch_mode.sh|*/switch_mode.sh|iptables.sh|*/iptables.sh|action.sh|*/action.sh) _is_op_script=1 ;;
+                ProxyConfig.sh|*/ProxyConfig.sh) _is_proxy_cfg=1 ;;
+                NoAdsService.sh|*/NoAdsService.sh) _is_noads=1 ;;
+                --watchdog) _has_wd_flag=1 ;;
+                --diag-flock|diag-flock|--diag-sni|diag-sni) _is_diag_flag=1 ;;
+            esac
+        done
+        IFS="$_old_ifs"
+
+        if [ "$_is_wd_script" -eq 1 ] && [ "$_has_wd_flag" -eq 1 ]; then
+            _role="watchdog"
+            case "$wd_pid_val" in
+                ''|none|*[!0-9]*) PROC_WD_PID_MATCH="unrecorded" ;;
+                *)
+                    if [ "$_cp_pid" = "$wd_pid_val" ]; then
+                        PROC_WD_PID_MATCH="yes"
+                    elif kill -0 "$wd_pid_val" 2>/dev/null || [ -d "$PROC_DIR/$wd_pid_val" ]; then
+                        PROC_WD_PID_MATCH="mismatch"
+                    else
+                        PROC_WD_PID_MATCH="stale_diag_pid"
+                    fi
+                    ;;
+            esac
+        elif [ "$_is_proxy_cfg" -eq 1 ]; then
+            _role="proxy_cfg"
+        elif [ "$_is_noads" -eq 1 ]; then
+            _role="noads"
+        elif [ "$_is_op_script" -eq 1 ] && [ "$_is_diag_flag" -eq 0 ]; then
+            _role="op_script"
+        fi
+    fi
+
+    [ -n "$_role" ] && PROC_ROLE="$_role"
+    return 0
+}
+
+# 反查全机所有持有 agh_op.flock / agh_watchdog.flock 的进程 FD（先通过临时软链接实测 -lname 能力；不可用时降级 ls -ln | awk，绝不静默漏检）
+scan_flock_fd_holders() {
+    _find_bin=""
+    _find_sub=""
+    _probe_dir="$RUN_DIR/.agh_find_probe.$$"
+    rm -rf "$_probe_dir" 2>/dev/null
+    mkdir -p "$_probe_dir" 2>/dev/null
+    if ln -s "$RUN_DIR/agh_op.flock.probe_target" "$_probe_dir/8" 2>/dev/null; then
+        if [ -n "${AGH_FIND_BIN_OVERRIDE:-}" ]; then
+            if [ -x "$AGH_FIND_BIN_OVERRIDE" ]; then
+                _p_out=$("$AGH_FIND_BIN_OVERRIDE" "$_probe_dir" -maxdepth 1 \( -lname '*agh_op.flock*' -o -lname '*agh_watchdog.flock*' \) 2>/dev/null 7>&- 8>&- 9>&- || true)
+                case "$_p_out" in
+                    "$_probe_dir/8"|*/.agh_find_probe."$$"/8)
+                        _find_bin="$AGH_FIND_BIN_OVERRIDE"
+                        _find_sub=""
+                        ;;
+                esac
+            fi
+        else
+            # 显式优先检测系统 /system/bin/find 与 Toybox find，主动避开不支持 -lname 的 BusyBox find
+            if [ -x /system/bin/find ]; then
+                _p_out=$(/system/bin/find "$_probe_dir" -maxdepth 1 \( -lname '*agh_op.flock*' -o -lname '*agh_watchdog.flock*' \) 2>/dev/null 7>&- 8>&- 9>&- || true)
+                case "$_p_out" in
+                    "$_probe_dir/8"|*/.agh_find_probe."$$"/8)
+                        _find_bin="/system/bin/find"
+                        _find_sub=""
+                        ;;
+                esac
+            fi
+            if [ -z "$_find_bin" ] && [ -x /system/bin/toybox ]; then
+                _p_out=$(/system/bin/toybox find "$_probe_dir" -maxdepth 1 \( -lname '*agh_op.flock*' -o -lname '*agh_watchdog.flock*' \) 2>/dev/null 7>&- 8>&- 9>&- || true)
+                case "$_p_out" in
+                    "$_probe_dir/8"|*/.agh_find_probe."$$"/8)
+                        _find_bin="/system/bin/toybox"
+                        _find_sub="find"
+                        ;;
+                esac
+            fi
+            if [ -z "$_find_bin" ]; then
+                _sys_find=$(command -v find 2>/dev/null || true)
+                if [ -n "$_sys_find" ] && [ -x "$_sys_find" ]; then
+                    _sys_find_real=$(resolve_symlink_target "$_sys_find")
+                    case "${_sys_find} ${_sys_find_real}" in
+                        *busybox*) ;;
+                        *)
+                            _p_out=$("$_sys_find" "$_probe_dir" -maxdepth 1 \( -lname '*agh_op.flock*' -o -lname '*agh_watchdog.flock*' \) 2>/dev/null 7>&- 8>&- 9>&- || true)
+                            case "$_p_out" in
+                                "$_probe_dir/8"|*/.agh_find_probe."$$"/8)
+                                    _find_bin="$_sys_find"
+                                    _find_sub=""
+                                    ;;
+                            esac
+                            ;;
+                    esac
+                fi
+            fi
+        fi
+    fi
+    rm -rf "$_probe_dir" 2>/dev/null
+
+    if [ -n "$_find_bin" ]; then
+        if [ -n "$_find_sub" ]; then
+            _matched_links=$("$_find_bin" "$_find_sub" "$PROC_DIR"/[0-9]*/fd -maxdepth 1 \
+                \( -lname '*agh_op.flock*' -o -lname '*agh_watchdog.flock*' \) 2>/dev/null 7>&- 8>&- 9>&- || true)
+        else
+            _matched_links=$("$_find_bin" "$PROC_DIR"/[0-9]*/fd -maxdepth 1 \
+                \( -lname '*agh_op.flock*' -o -lname '*agh_watchdog.flock*' \) 2>/dev/null 7>&- 8>&- 9>&- || true)
+        fi
+        _old_ifs="$IFS"
+        IFS='
+'
+        set -f
+        for _fd_link in $_matched_links; do
+            [ -n "$_fd_link" ] || continue
+            [ -e "$_fd_link" ] || [ -L "$_fd_link" ] || continue
+            _rest="${_fd_link#$PROC_DIR/}"
+            _pid_n="${_rest%%/fd/*}"
+            _fd_n="${_fd_link##*/}"
+            _fd_t=""
+            if command -v readlink >/dev/null 2>&1; then
+                _fd_t=$(readlink -f "$_fd_link" 2>/dev/null || readlink "$_fd_link" 2>/dev/null || true)
+            fi
+            [ -n "$_fd_t" ] && printf '%s|%s|%s\n' "$_pid_n" "$_fd_n" "$_fd_t"
+        done
+        set +f
+        IFS="$_old_ifs"
+        return 0
+    fi
+
+    # 降级兜底：无可用 -lname find 时执行单次 ls -ln + awk，按目录头跟踪 PID 并提取指向 .flock 的 FD
+    ls -ln "$PROC_DIR"/[0-9]*/fd "$RUN_DIR" 2>/dev/null 7>&- 8>&- 9>&- | awk -v proc_dir="$PROC_DIR" '
+        /\/fd:$/ && index($0, proc_dir "/") == 1 {
+            d = $0
+            sub(/:$/, "", d)
+            sub(/\/fd$/, "", d)
+            p = substr(d, length(proc_dir) + 2)
+            cur_pid = (p ~ /^[0-9]+$/) ? p : ""
+            next
+        }
+        /:$/ {
+            cur_pid = ""
+            next
+        }
+        cur_pid != "" && ($0 ~ /agh_op\.flock/ || $0 ~ /agh_watchdog\.flock/) {
+            arrow_pos = index($0, " -> ")
+            if (arrow_pos > 0) {
+                fd_n = ""
+                for (i = 2; i <= NF; i++) {
+                    if ($i == "->") {
+                        fd_n = $(i - 1)
+                        break
+                    }
+                }
+                fd_t = substr($0, arrow_pos + 4)
+                if (fd_n ~ /^[0-9]+$/ && fd_t != "") {
+                    print cur_pid "|" fd_n "|" fd_t
+                }
+            }
+        }
+    '
+    return 0
+}
+
 diagnose_flock_state() {
     brief_arg="${1:-}"
     sh_target=$(resolve_symlink_target "$SH_BIN")
@@ -1991,7 +2212,10 @@ diagnose_flock_state() {
 
     for sub_script in "$switch_bin_path" "$ipt_bin_path"; do
         [ -f "$sub_script" ] || continue
-        sub_out=$("$SH_BIN" "$sub_script" --diag-flock --brief </dev/null 2>/dev/null || true)
+        sub_out=$(AGH_DIAG_VERIFIED_FLOCK_BIN="$FLOCK_RESOLVED_BIN" \
+                  AGH_DIAG_VERIFIED_FLOCK_SUBCMD="$FLOCK_RESOLVED_SUBCMD" \
+                  AGH_DIAG_VERIFIED_FLOCK_STEPS="$FLOCK_VERIFY_STEPS" \
+                  "$SH_BIN" "$sub_script" --diag-flock --brief </dev/null 2>/dev/null 7>&- 8>&- 9>&- || true)
         printf '%s\n' "$sub_out"
         sub_status=$(printf '%s\n' "$sub_out" | sed -n 's/.*status=\([^ ]*\).*/\1/p' | head -n 1)
         sub_impl=$(printf '%s\n' "$sub_out" | sed -n 's/.*impl=\([^ ]*\).*/\1/p' | head -n 1)
@@ -2086,176 +2310,80 @@ diagnose_flock_state() {
     active_op_holders=0
     core_bin="$BIN_DIR/AdGuardHome"
     core_bin_real=$(resolve_symlink_target "$core_bin")
-    cr_char=$(printf '\r')
 
-    for pdir in "$PROC_DIR"/[0-9]*; do
-        [ -d "$pdir" ] || continue
-        pid_num="${pdir##*/}"
+    _fd_hits=$(scan_flock_fd_holders)
+    _old_ifs="$IFS"
+    IFS='
+'
+    set -f
+    for _hit in $_fd_hits; do
+        [ -n "$_hit" ] || continue
+        pid_num="${_hit%%'|'*}"
+        _hit_rest="${_hit#*'|'}"
+        fd_num="${_hit_rest%%'|'*}"
+        fd_target="${_hit_rest#*'|'}"
+        [ -n "$pid_num" ] && [ -n "$fd_num" ] && [ -n "$fd_target" ] || continue
         [ "$pid_num" = "$$" ] && continue
 
-        # 纯 Shell 零派生快速过滤无关 /proc/<pid> 条目，消除数百进程下的数千次 fork 阻塞风险
-        p_comm=""
-        [ -r "$pdir/comm" ] && { IFS= read -r p_comm < "$pdir/comm" 2>/dev/null || true; }
-        p_comm="${p_comm%$cr_char}"
-        c_peek=""
-        [ -r "$pdir/cmdline" ] && { IFS= read -r c_peek < "$pdir/cmdline" 2>/dev/null || true; }
+        classify_proc_role_for_pid "$pid_num" || continue
+        role="$PROC_ROLE"
+        wd_pid_match="$PROC_WD_PID_MATCH"
 
-        if [ "$pid_num" != "$op_pid_val" ] && [ "$pid_num" != "$wd_pid_val" ]; then
-            [ -z "$p_comm" ] && [ -z "$c_peek" ] && continue
-            cand_hit=0
-            for _probe_txt in "$p_comm" "$c_peek"; do
-                [ -n "$_probe_txt" ] || continue
-                case "$_probe_txt" in
-                    *AdGuardHome*|*agh_*|*service.sh*|*switch_mode.sh*|*iptables.sh*|*action.sh*|*ProxyConfig.sh*|*NoAdsService.sh*|sh|*/sh|sh\ *|*/sh\ *|*mksh*|*ash*|*dash*|*bash*|*ksh*|*zsh*|*busybox*|*toybox*|su|*/su|su\ *|*/su\ *|*magisk*|*ksud*|*nsenter*|*nohup*|*env*|*timeout*|*flock*|*sleep*|*python*|*perl*)
-                        cand_hit=1
-                        break
-                        ;;
-                esac
-            done
-            [ "$cand_hit" -eq 1 ] || continue
-        fi
-
-        # 仅对候选模块/Shell/核心进程读取 exe 与完整 NUL 分隔 cmdline
-        p_exe=""
-        if [ -L "$pdir/exe" ] || [ -e "$pdir/exe" ]; then
-            p_exe=$(readlink -f "$pdir/exe" 2>/dev/null || readlink "$pdir/exe" 2>/dev/null || true)
-        fi
-        p_exe_clean="${p_exe% (deleted)}"
-        cmdline_lines=""
-        [ -r "$pdir/cmdline" ] && cmdline_lines=$( { tr '\000' '\n' < "$pdir/cmdline"; } 2>/dev/null || true )
-        [ -d "$pdir" ] || continue
-
-        if [ -z "$p_exe_clean" ] && [ -z "$p_comm" ] && [ -z "$cmdline_lines" ]; then
-            continue
-        fi
-
-        # 精确角色识别：不再仅凭 cmdline 任意子串包含 AdGuardHome 判定核心
-        role=""
-        # 1) 核心识别：优先通过 /proc/<pid>/exe 实际路径核对，结合 comm 辅助判断
-        if [ -n "$p_exe_clean" ]; then
-            if [ "$p_exe_clean" = "$core_bin" ] || [ "$p_exe_clean" = "$core_bin_real" ]; then
-                role="core"
-            else
-                case "$p_exe_clean" in
-                    */bin/AdGuardHome|*/AdGuardHome)
-                        if [ -z "$p_comm" ] || [ "$p_comm" = "AdGuardHome" ]; then
-                            role="core"
-                        fi
-                        ;;
-                esac
-            fi
-        elif [ ! -e "$pdir/exe" ] && [ ! -L "$pdir/exe" ]; then
-            # 仅在测试模拟环境或受限内核无 /proc/<pid>/exe 时，严格要求 comm 与 argv[0] 均指向核心本身
-            argv0="${cmdline_lines%%
-*}"
-            if [ "$p_comm" = "AdGuardHome" ]; then
-                case "$argv0" in
-                    AdGuardHome|*/AdGuardHome) role="core" ;;
-                esac
-            fi
-        fi
-
-        # 2) 守护、辅助脚本与合法短期操作脚本识别（纯 Shell 参数逐行匹配，零 grep 派生）
-        wd_pid_match="n/a"
-        if [ -z "$role" ] && [ -n "$cmdline_lines" ]; then
-            is_wd_script=0
-            has_wd_flag=0
-            is_proxy_cfg=0
-            is_noads=0
-            is_op_script=0
-            is_diag_flag=0
-            _old_ifs="$IFS"
-            IFS='
-'
-            for _arg in $cmdline_lines; do
-                case "$_arg" in
-                    service.sh|*/service.sh) is_wd_script=1; is_op_script=1 ;;
-                    switch_mode.sh|*/switch_mode.sh|iptables.sh|*/iptables.sh|action.sh|*/action.sh) is_op_script=1 ;;
-                    ProxyConfig.sh|*/ProxyConfig.sh) is_proxy_cfg=1 ;;
-                    NoAdsService.sh|*/NoAdsService.sh) is_noads=1 ;;
-                    --watchdog) has_wd_flag=1 ;;
-                    --diag-flock|diag-flock|--diag-sni|diag-sni) is_diag_flag=1 ;;
-                esac
-            done
-            IFS="$_old_ifs"
-
-            if [ "$is_wd_script" -eq 1 ] && [ "$has_wd_flag" -eq 1 ]; then
-                role="watchdog"
-                case "$wd_pid_val" in
-                    ''|none|*[!0-9]*) wd_pid_match="unrecorded" ;;
+        case "$fd_target" in
+            *"agh_op.flock"*)
+                if [ "$role" = "op_script" ] && { [ "$pid_num" = "$op_pid_val" ] || [ "$op_locked" = "yes" ]; }; then
+                    active_op_holders=$((active_op_holders + 1))
+                    printf 'ACTIVE_OP_LOCK_HOLDER role=%s pid=%s fd=%s diag_pid=%s target=%s\n' \
+                        "$role" "$pid_num" "$fd_num" "$op_pid_val" "$fd_target"
+                elif [ "$role" = "watchdog" ] && [ "$pid_num" = "$op_pid_val" ] && [ "$op_locked" = "yes" ]; then
+                    active_op_holders=$((active_op_holders + 1))
+                    printf 'ACTIVE_OP_LOCK_HOLDER role=%s pid=%s fd=%s diag_pid=%s target=%s\n' \
+                        "$role" "$pid_num" "$fd_num" "$op_pid_val" "$fd_target"
+                else
+                    op_fd_leaks=$((op_fd_leaks + 1))
+                    printf 'FD_LEAK_DETECTED lock=op role=%s pid=%s fd=%s target=%s\n' \
+                        "$role" "$pid_num" "$fd_num" "$fd_target"
+                fi
+                ;;
+            *"agh_watchdog.flock"*)
+                _pid_wd_fd_cnt=0
+                for _c_hit in $_fd_hits; do
+                    [ -n "$_c_hit" ] || continue
+                    _c_pid="${_c_hit%%'|'*}"
+                    _c_rest="${_c_hit#*'|'}"
+                    _c_tgt="${_c_rest#*'|'}"
+                    if [ "$_c_pid" = "$pid_num" ]; then
+                        case "$_c_tgt" in
+                            *"agh_watchdog.flock"*) _pid_wd_fd_cnt=$((_pid_wd_fd_cnt + 1)) ;;
+                        esac
+                    fi
+                done
+                _wd_fd_valid=0
+                case "$fd_num" in
+                    ''|*[!0-9]*) ;;
                     *)
-                        if [ "$pid_num" = "$wd_pid_val" ]; then
-                            wd_pid_match="yes"
-                        elif kill -0 "$wd_pid_val" 2>/dev/null || [ -d "$PROC_DIR/$wd_pid_val" ]; then
-                            wd_pid_match="mismatch"
-                        else
-                            wd_pid_match="stale_diag_pid"
+                        if [ "$role" = "watchdog" ] && [ "$_pid_wd_fd_cnt" -eq 1 ]; then
+                            if [ "$fd_num" -eq 8 ] && [ "$wd_pid_match" != "mismatch" ]; then
+                                _wd_fd_valid=1
+                            elif [ "$wd_pid_match" = "yes" ] && [ "$fd_num" -ge 10 ]; then
+                                _wd_fd_valid=1
+                            fi
                         fi
                         ;;
                 esac
-            elif [ "$is_proxy_cfg" -eq 1 ]; then
-                role="proxy_cfg"
-            elif [ "$is_noads" -eq 1 ]; then
-                role="noads"
-            elif [ "$is_op_script" -eq 1 ] && [ "$is_diag_flag" -eq 0 ]; then
-                role="op_script"
-            fi
-        fi
-
-        # 仅对已识别角色，或路径/诊断 PID 与本模块相关的 unknown 进程执行 FD 检查，无法确认核心时保持 unknown
-        if [ -z "$role" ]; then
-            relevant_proc=0
-            [ "$pid_num" = "$op_pid_val" ] && relevant_proc=1
-            [ "$pid_num" = "$wd_pid_val" ] && relevant_proc=1
-            case "$cmdline_lines" in
-                *AdGuardHome*|*agh_op*|*agh_watchdog*|*service.sh*|*switch_mode.sh*|*iptables.sh*|*ProxyConfig.sh*|*NoAdsService.sh*)
-                    relevant_proc=1
-                    ;;
-            esac
-            [ "$relevant_proc" -eq 1 ] || continue
-            role="unknown"
-        fi
-
-        [ -d "$pdir/fd" ] || continue
-        for fd_link in "$pdir/fd"/*; do
-            [ -d "$pdir" ] || break
-            [ -e "$fd_link" ] || [ -L "$fd_link" ] || continue
-            fd_num="${fd_link##*/}"
-            fd_target=""
-            if command -v readlink >/dev/null 2>&1; then
-                fd_target=$(readlink -f "$fd_link" 2>/dev/null || readlink "$fd_link" 2>/dev/null || true)
-            fi
-            [ -d "$pdir" ] || break
-            [ -n "$fd_target" ] || continue
-            case "$fd_target" in
-                *"agh_op.flock"*)
-                    if [ "$role" = "op_script" ] && { [ "$pid_num" = "$op_pid_val" ] || [ "$op_locked" = "yes" ]; }; then
-                        active_op_holders=$((active_op_holders + 1))
-                        printf 'ACTIVE_OP_LOCK_HOLDER role=%s pid=%s fd=%s diag_pid=%s target=%s\n' \
-                            "$role" "$pid_num" "$fd_num" "$op_pid_val" "$fd_target"
-                    elif [ "$role" = "watchdog" ] && [ "$pid_num" = "$op_pid_val" ] && [ "$op_locked" = "yes" ]; then
-                        active_op_holders=$((active_op_holders + 1))
-                        printf 'ACTIVE_OP_LOCK_HOLDER role=%s pid=%s fd=%s diag_pid=%s target=%s\n' \
-                            "$role" "$pid_num" "$fd_num" "$op_pid_val" "$fd_target"
-                    else
-                        op_fd_leaks=$((op_fd_leaks + 1))
-                        printf 'FD_LEAK_DETECTED lock=op role=%s pid=%s fd=%s target=%s\n' \
-                            "$role" "$pid_num" "$fd_num" "$fd_target"
-                    fi
-                    ;;
-                *"agh_watchdog.flock"*)
-                    if [ "$role" = "watchdog" ] && [ "$fd_num" = "8" ] && [ "$wd_pid_match" != "mismatch" ]; then
-                        printf 'WATCHDOG_LOCK_OK role=watchdog pid=%s fd=%s wd_pid_match=%s target=%s\n' \
-                            "$pid_num" "$fd_num" "$wd_pid_match" "$fd_target"
-                    else
-                        wd_fd_leaks=$((wd_fd_leaks + 1))
-                        printf 'FD_LEAK_DETECTED lock=watchdog role=%s pid=%s fd=%s wd_pid_match=%s target=%s\n' \
-                            "$role" "$pid_num" "$fd_num" "$wd_pid_match" "$fd_target"
-                    fi
-                    ;;
-            esac
-        done
+                if [ "$_wd_fd_valid" -eq 1 ]; then
+                    printf 'WATCHDOG_LOCK_OK role=watchdog pid=%s fd=%s wd_pid_match=%s target=%s\n' \
+                        "$pid_num" "$fd_num" "$wd_pid_match" "$fd_target"
+                else
+                    wd_fd_leaks=$((wd_fd_leaks + 1))
+                    printf 'FD_LEAK_DETECTED lock=watchdog role=%s pid=%s fd=%s wd_pid_match=%s target=%s\n' \
+                        "$role" "$pid_num" "$fd_num" "$wd_pid_match" "$fd_target"
+                fi
+                ;;
+        esac
     done
+    set +f
+    IFS="$_old_ifs"
     printf 'FD_LEAK_CHECK op_fd_leaks=%s non_watchdog_wd_leaks=%s active_op_holders=%s\n' \
         "$op_fd_leaks" "$wd_fd_leaks" "$active_op_holders"
 
@@ -2318,11 +2446,11 @@ fi
 # 软重启系统就绪门控：兼容 sys.boot_completed=1 不归零的 killall system_server / ctl.restart zygote 场景
 is_system_ready_after_soft_reboot() {
     _sr_reason="${1:-}"
-    _sr_boot=$(getprop sys.boot_completed 2>/dev/null)
+    _sr_boot=$(getprop sys.boot_completed 2>/dev/null 7>&- 8>&- 9>&-)
     if [ -n "$_sr_boot" ] && [ "$_sr_boot" != "1" ]; then
         return 1
     fi
-    _sr_zyg=$(getprop init.svc.zygote 2>/dev/null)
+    _sr_zyg=$(getprop init.svc.zygote 2>/dev/null 7>&- 8>&- 9>&-)
     if [ -n "$_sr_zyg" ] && [ "$_sr_zyg" != "running" ]; then
         return 1
     fi
@@ -2722,7 +2850,7 @@ fi
 # ==============================================================================
 # 默认启动入口（开机或软重启由 Magisk / KernelSU / APatch 自动触发）
 # ==============================================================================
-find "$ADGPATH" "$SCRIPT_DIR" -type f -name "*.sh" -exec chattr -i {} \; 2>/dev/null
+find "$ADGPATH" "$SCRIPT_DIR" -type f -name "*.sh" -exec chattr -i {} \; 2>/dev/null 7>&- 8>&- 9>&-
 
 # 检查冲突的 hosts 模块并中止启动（绝不擅自修改或删除用户的其他模块）
 found_hosts=false
@@ -2754,7 +2882,7 @@ if [ -z "${1:-}" ]; then
     _boot_wait_loops=0
     _boot_wait_max="${AGH_BOOT_WAIT_MAX_LOOPS:-25}"
     while [ "$_boot_wait_loops" -lt "$_boot_wait_max" ]; do
-        _boot_done=$(getprop sys.boot_completed 2>/dev/null)
+        _boot_done=$(getprop sys.boot_completed 2>/dev/null 7>&- 8>&- 9>&-)
         [ -z "$_boot_done" ] || [ "$_boot_done" = "1" ] && break
         safe_sleep 1 || break
         _boot_wait_loops=$((_boot_wait_loops + 1))
