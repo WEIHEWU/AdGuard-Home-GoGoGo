@@ -951,10 +951,17 @@ validate_yaml_file() {
     grep -q '^dns:' "$vf" 2>/dev/null || return 1
     grep -q '^user_rules:' "$vf" 2>/dev/null || return 1
     if [ -x "$BIN_DIR/AdGuardHome" ]; then
-        "$BIN_DIR/AdGuardHome" --version >/dev/null 2>&1 7>&- 8>&- 9>&-
-        if [ $? -eq 0 ]; then
+        if [ "$(uname -s 2>/dev/null)" = "Linux" ] || [ "${AGH_FORCE_BIN_CHECK:-0}" = "1" ]; then
+            "$BIN_DIR/AdGuardHome" --version >/dev/null 2>&1 7>&- 8>&- 9>&- || return 1
             "$BIN_DIR/AdGuardHome" --check-config -c "$vf" -w "$BIN_DIR" >/dev/null 2>&1 7>&- 8>&- 9>&- || return 1
+        else
+            "$BIN_DIR/AdGuardHome" --version >/dev/null 2>&1 7>&- 8>&- 9>&-
+            if [ $? -eq 0 ]; then
+                "$BIN_DIR/AdGuardHome" --check-config -c "$vf" -w "$BIN_DIR" >/dev/null 2>&1 7>&- 8>&- 9>&- || return 1
+            fi
         fi
+    elif [ "$(uname -s 2>/dev/null)" = "Linux" ] || [ "${AGH_FORCE_BIN_CHECK:-0}" = "1" ]; then
+        return 1
     fi
     return 0
 }

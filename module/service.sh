@@ -1282,13 +1282,8 @@ spawn_agh_in_root_ns() {
     fi
 
     if [ -n "$BB_BIN" ]; then
-        if "$BB_BIN" nsenter -t 1 -m -u -i -n -p -F -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
-            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -u -i -n -p -F -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
-            SPAWN_PID=$!
-            reset_spawn_priority "$SPAWN_PID"
-            return 0
-        elif "$BB_BIN" nsenter -t 1 -m -u -i -n -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
-            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -u -i -n -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
+        if "$BB_BIN" nsenter -t 1 -m -n -p -F -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
+            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD "$BB_BIN" nsenter -t 1 -m -n -p -F -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
             reset_spawn_priority "$SPAWN_PID"
             return 0
@@ -1306,13 +1301,8 @@ spawn_agh_in_root_ns() {
     fi
 
     if command -v nsenter >/dev/null 2>&1; then
-        if nsenter -t 1 -m -u -i -n -p -F -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
-            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -t 1 -m -u -i -n -p -F -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
-            SPAWN_PID=$!
-            reset_spawn_priority "$SPAWN_PID"
-            return 0
-        elif nsenter -t 1 -m -u -i -n -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
-            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -t 1 -m -u -i -n -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
+        if nsenter -t 1 -m -n -p -F -G "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
+            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -t 1 -m -n -p -F -G "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
             reset_spawn_priority "$SPAWN_PID"
             return 0
@@ -1327,8 +1317,8 @@ spawn_agh_in_root_ns() {
             reset_spawn_priority "$SPAWN_PID"
             return 0
         elif command -v setpriv >/dev/null 2>&1 && \
-             nsenter -t 1 -m -u -i -n setpriv --egid "$AGH_GID" --rgid "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
-            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -t 1 -m -u -i -n setpriv --egid "$AGH_GID" --rgid "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
+             nsenter -t 1 -m -n setpriv --egid "$AGH_GID" --rgid "$AGH_GID" "$TRUE_BIN" >/dev/null 2>&1; then
+            ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD nsenter -t 1 -m -n setpriv --egid "$AGH_GID" --rgid "$AGH_GID" "$@" ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
             SPAWN_PID=$!
             reset_spawn_priority "$SPAWN_PID"
             return 0
@@ -1355,10 +1345,17 @@ verify_or_restore_yaml() {
         fi
     fi
     if [ -x "$BIN_DIR/AdGuardHome" ]; then
-        "$BIN_DIR/AdGuardHome" --version >/dev/null 2>&1 7>&- 8>&- 9>&-
-        if [ $? -eq 0 ]; then
+        if [ "$(uname -s 2>/dev/null)" = "Linux" ] || [ "${AGH_FORCE_BIN_CHECK:-0}" = "1" ]; then
+            "$BIN_DIR/AdGuardHome" --version >/dev/null 2>&1 7>&- 8>&- 9>&- || return 1
             "$BIN_DIR/AdGuardHome" --check-config -c "$check_f" -w "$BIN_DIR" >/dev/null 2>&1 7>&- 8>&- 9>&- || return 1
+        else
+            "$BIN_DIR/AdGuardHome" --version >/dev/null 2>&1 7>&- 8>&- 9>&-
+            if [ $? -eq 0 ]; then
+                "$BIN_DIR/AdGuardHome" --check-config -c "$check_f" -w "$BIN_DIR" >/dev/null 2>&1 7>&- 8>&- 9>&- || return 1
+            fi
         fi
+    elif [ "$(uname -s 2>/dev/null)" = "Linux" ] || [ "${AGH_FORCE_BIN_CHECK:-0}" = "1" ]; then
+        return 1
     fi
     return 0
 }
@@ -1426,6 +1423,25 @@ ensure_agh_started() {
         disarm_nat_safety_valve >/dev/null 2>&1 || true
     fi
     stop_agh_wait
+
+    if [ ! -x "$BIN_DIR/AdGuardHome" ]; then
+        chmod 0755 "$BIN_DIR/AdGuardHome" 2>/dev/null || true
+    fi
+    if [ ! -x "$BIN_DIR/AdGuardHome" ]; then
+        log_msg "[FATAL] AdGuardHome 核心二进制缺失或不可执行: $BIN_DIR/AdGuardHome"
+        disarm_nat_safety_valve >/dev/null 2>&1 || true
+        return 1
+    fi
+    if [ "$(uname -s 2>/dev/null)" = "Linux" ] || [ "${AGH_FORCE_BIN_CHECK:-0}" = "1" ]; then
+        _ver_out=$("$BIN_DIR/AdGuardHome" --version 2>&1 7>&- 8>&- 9>&-)
+        _ver_rc=$?
+        if [ "$_ver_rc" -ne 0 ]; then
+            _ver_one=$(printf '%s' "$_ver_out" | tr '\r\n' '  ' | cut -c 1-160)
+            log_msg "[FATAL] AdGuardHome 核心二进制自检失败 (rc=$_ver_rc${_ver_one:+: $_ver_one})，疑似 CPU 指令集不兼容 (如 SIGILL=132) 或二进制损坏，中止启动并卸载防火墙规则"
+            disarm_nat_safety_valve >/dev/null 2>&1 || true
+            return 1
+        fi
+    fi
 
     if ! ensure_valid_config; then
         log_msg "[ERROR] AdGuardHome.yaml 校验与恢复失败，中止启动以保护配置"
@@ -1525,6 +1541,15 @@ ensure_agh_started() {
                 log_msg "[INFO] AdGuardHome ready (mode=$active_mode, PID=${agh_real_pid:-unknown}, GID=$AGH_GID, DNS=$R1, HTTP=$R2)"
             fi
             return 0
+        fi
+
+        if [ -n "$SPAWN_PID" ] && ! kill -0 "$SPAWN_PID" 2>/dev/null; then
+            log_msg "[WARN] AdGuardHome 第 $try_count/$MAX_TRIES 次启动未就绪 (PID=$SPAWN_PID 已退出)"
+        elif [ -s "$AGH_DIR/crash.log" ]; then
+            _crash_tail=$(tail -n 1 "$AGH_DIR/crash.log" 2>/dev/null | tr '\r\n' '  ' | cut -c 1-140)
+            log_msg "[WARN] AdGuardHome 第 $try_count/$MAX_TRIES 次启动未就绪 (crash.log: ${_crash_tail:-non-empty})"
+        else
+            log_msg "[WARN] AdGuardHome 第 $try_count/$MAX_TRIES 次启动未就绪 (PID=${SPAWN_PID:-unknown})"
         fi
 
         stop_agh_wait
@@ -1927,8 +1952,8 @@ start_singleton_watchdog() {
     elif command -v nice >/dev/null 2>&1 && nice -n 19 "$TRUE_BIN" >/dev/null 2>&1; then
         NICE_CMD="nice -n 19"
     fi
-    if [ -n "$BB_BIN" ] && "$BB_BIN" nsenter -t 1 -m -u -i -n -p -F "$TRUE_BIN" >/dev/null 2>&1; then
-        ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD $NICE_CMD "$BB_BIN" nsenter -t 1 -m -u -i -n -p -F "$SH_BIN" "$SELF_SCRIPT" --watchdog ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
+    if [ -n "$BB_BIN" ] && "$BB_BIN" nsenter -t 1 -m -n -p -F "$TRUE_BIN" >/dev/null 2>&1; then
+        ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD $NICE_CMD "$BB_BIN" nsenter -t 1 -m -n -p -F "$SH_BIN" "$SELF_SCRIPT" --watchdog ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
     elif [ -n "$BB_BIN" ] && "$BB_BIN" nsenter -t 1 -m -n "$TRUE_BIN" >/dev/null 2>&1; then
         ( unset AGH_OP_LOCK_HELD AGH_OP_LOCK_HOLDER_PID AGH_TX_TARGET_MODE AGH_SWITCH_OP_ID AGH_MONO_BASE_SEC AGH_MONO_CLOCK_SOURCE AGH_TX_FLOCK_KIND AGH_TX_FLOCK_BIN AGH_TX_FLOCK_TARGET AGH_TX_FLOCK_SUBCMD AGH_TX_FLOCK_IMPL AGH_TX_FLOCK_CMD_STR AGH_TX_FLOCK_VERIFY_STEPS AGH_TX_VALIDATED_YAML_FILE AGH_TX_VALIDATED_YAML_SHA AGH_TX_PRECLEANED; exec $SETSID_CMD $NICE_CMD "$BB_BIN" nsenter -t 1 -m -n "$SH_BIN" "$SELF_SCRIPT" --watchdog ) </dev/null >/dev/null 2>&1 7>&- 8>&- 9>&- &
     elif command -v nsenter >/dev/null 2>&1 && nsenter -t 1 -m -n "$TRUE_BIN" >/dev/null 2>&1; then

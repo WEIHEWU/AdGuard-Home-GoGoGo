@@ -187,12 +187,29 @@ validate_yaml_structure() {
   return 0
 }
 
-# 使用目标核心校验 YAML 兼容性（若当前执行环境可执行该架构二进制）
+# 校验核心二进制在当前设备上是否可正常执行（拦截 SIGILL=132 / 损坏二进制；跨平台非 Linux 宿主测试环境仅在设置了 AGH_FORCE_BIN_CHECK=1 时强制要求可运行）
+verify_core_binary_exec() {
+  chk_bin="$1"
+  [ -s "$chk_bin" ] || return 1
+  chmod 0755 "$chk_bin" 2>/dev/null || true
+  [ -x "$chk_bin" ] || return 1
+  if [ "$(uname -s 2>/dev/null)" = "Linux" ] || [ "${AGH_FORCE_BIN_CHECK:-0}" = "1" ]; then
+    "$chk_bin" --version >/dev/null 2>&1 || return 1
+  fi
+  return 0
+}
+
+# 使用目标核心校验 YAML 兼容性（Linux 真机环境下若二进制无法执行直接失败；非 Linux 宿主沙盒按环境变量开关判定）
 validate_yaml_with_bin() {
   vf="$1"
   check_bin="${2:-$BIN_DIR/AdGuardHome}"
   validate_yaml_structure "$vf" || return 1
-  if [ -x "$check_bin" ]; then
+  chmod 0755 "$check_bin" 2>/dev/null || true
+  if [ "$(uname -s 2>/dev/null)" = "Linux" ] || [ "${AGH_FORCE_BIN_CHECK:-0}" = "1" ]; then
+    [ -x "$check_bin" ] || return 1
+    "$check_bin" --version >/dev/null 2>&1 || return 1
+    "$check_bin" --check-config -c "$vf" -w "${vf%/*}" >/dev/null 2>&1 || return 1
+  elif [ -x "$check_bin" ]; then
     if "$check_bin" --version >/dev/null 2>&1; then
       "$check_bin" --check-config -c "$vf" -w "${vf%/*}" >/dev/null 2>&1 || return 1
     fi
@@ -259,6 +276,11 @@ if [ "$IS_UPGRADE" -eq 1 ]; then
   if [ -f "$BIN_DIR/AdGuardHome.yaml.bak" ]; then
     copy_and_verify_file "$BIN_DIR/AdGuardHome.yaml.bak" "$UPGRADE_BACKUP_DIR/bin/AdGuardHome.yaml.bak" || \
       fail_install "Failed to back up AdGuardHome.yaml.bak" "备份 AdGuardHome.yaml.bak 失败"
+  fi
+  if [ -f "$BIN_DIR/AdGuardHome" ]; then
+    copy_backup_fast "$BIN_DIR/AdGuardHome" "$UPGRADE_BACKUP_DIR/bin/AdGuardHome" || \
+      fail_install "Failed to back up AdGuardHome binary" "备份旧版 AdGuardHome 核心二进制失败"
+    chmod 0755 "$UPGRADE_BACKUP_DIR/bin/AdGuardHome" 2>/dev/null || true
   fi
   if [ -f "$SCRIPT_DIR/config.prop" ]; then
     copy_and_verify_file "$SCRIPT_DIR/config.prop" "$UPGRADE_BACKUP_DIR/scripts/config.prop" || \
@@ -338,6 +360,21 @@ if [ "$IS_UPGRADE" -eq 1 ]; then
       fail_install "Staged file missing or empty: $req_f" "暂存文件缺失或为空: $req_f"
     fi
   done
+
+  chmod 0755 "$STAGE_DIR/bin/AdGuardHome" "$STAGE_DIR/scripts/"*.sh 2>/dev/null || true
+  if ! verify_core_binary_exec "$STAGE_DIR/bin/AdGuardHome"; then
+    if [ -f "$UPGRADE_BACKUP_DIR/bin/AdGuardHome" ] && verify_core_binary_exec "$UPGRADE_BACKUP_DIR/bin/AdGuardHome"; then
+      i18n_print "! Warning: New AdGuardHome binary failed execution smoke check; rolling back to backed-up binary" "! 警告: 新版 AdGuardHome 核心未通过执行冒烟测试，已自动回退至升级前备份核心"
+      copy_and_verify_file "$UPGRADE_BACKUP_DIR/bin/AdGuardHome" "$STAGE_DIR/bin/AdGuardHome" || {
+        rm -rf "$STAGE_DIR" 2>/dev/null
+        fail_install "Failed to roll back AdGuardHome binary from backup" "从升级备份回滚旧版 AdGuardHome 核心失败"
+      }
+      chmod 0755 "$STAGE_DIR/bin/AdGuardHome" 2>/dev/null || true
+    else
+      rm -rf "$STAGE_DIR" 2>/dev/null
+      fail_install "New AdGuardHome binary failed execution smoke check (CPU ISA mismatch/SIGILL or corrupted binary) and no valid backup binary available" "新版 AdGuardHome 核心无法在当前设备执行（疑似 CPU 指令集不兼容 SIGILL 或文件损坏），且无可用旧版核心回滚"
+    fi
+  fi
 
   # 使用新核心一次性校验现有主配置（或 .bak 备选）的兼容性
   i18n_print "- Validating existing configuration against updated core" "- 正在校验现有配置与新核心兼容性"
@@ -464,6 +501,17 @@ find "$AGH_DIR" -type d -exec chmod 0700 {} + 2>/dev/null || true
 chmod +x "$BIN_DIR/AdGuardHome" || fail_install "Failed to chmod AdGuardHome" "设置核心执行权限失败"
 chmod +x "$SCRIPT_DIR"/*.sh || fail_install "Failed to chmod scripts" "设置脚本执行权限失败"
 chown root:net_raw "$BIN_DIR/AdGuardHome" 2>/dev/null || true
+if ! verify_core_binary_exec "$BIN_DIR/AdGuardHome"; then
+  if [ "$IS_UPGRADE" -eq 1 ] && [ -n "${UPGRADE_BACKUP_DIR:-}" ] && [ -f "$UPGRADE_BACKUP_DIR/bin/AdGuardHome" ] && verify_core_binary_exec "$UPGRADE_BACKUP_DIR/bin/AdGuardHome"; then
+    i18n_print "! Warning: Installed AdGuardHome failed smoke test; restoring backed-up binary" "! 警告: 安装后的 AdGuardHome 未通过冒烟校验，正在恢复备份核心"
+    copy_and_verify_file "$UPGRADE_BACKUP_DIR/bin/AdGuardHome" "$BIN_DIR/AdGuardHome" || \
+      fail_install "Failed to restore backed-up AdGuardHome binary" "恢复旧版 AdGuardHome 核心失败"
+    chmod 0755 "$BIN_DIR/AdGuardHome" 2>/dev/null || true
+    chown root:net_raw "$BIN_DIR/AdGuardHome" 2>/dev/null || true
+  else
+    fail_install "Installed AdGuardHome binary failed execution smoke check (--version)" "安装后的 AdGuardHome 核心无法执行 (--version 冒烟测试失败)"
+  fi
+fi
 
 # 立即执行一次性安全解锁与广告缓存清理（主用户，零死循环）
 sh "$SCRIPT_DIR/NoAdsService.sh" >/dev/null 2>&1 || true

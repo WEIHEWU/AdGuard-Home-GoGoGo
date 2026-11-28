@@ -24,7 +24,7 @@ jobs:
         run: |
           case "${GITHUB_REF_NAME:-}" in
             v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
-            *)  VERSION_TAG="v20261125.2" ;;
+            *)  VERSION_TAG="v20261128.1" ;;
           esac
           VERSION_DATE="${VERSION_TAG#v}"
           case "$VERSION_TAG" in
@@ -56,18 +56,19 @@ jobs:
           body: |
             ### AdGuard Home GoGoGo `${{ env.VERSION_TAG }}`
 
-            全设备级满血 DNS + SNI (`443/8443`) 双引擎去广告防火墙模块维护更新版，内置 **[AdGuard-Home-GoGoGo-Core v2026-11-25](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core/releases/tag/v2026-11-25)**（无变动复用）与 **[AdGuard-Home-GoGoGo-Manager v2.24.30](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager/releases/tag/v2.24.30)**：
+            全设备级满血 DNS + SNI (`443/8443`) 双引擎去广告防火墙模块正式更新版，内置 **[AdGuard-Home-GoGoGo-Core v2026-11-28](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core/releases/tag/v2026-11-28)**（`GOARM64=v8.0` 全芯片兼容 + 运行时 LSE 动态加速）与 **[AdGuard-Home-GoGoGo-Manager v2.24.30](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager/releases/tag/v2.24.30)**：
 
-            - **Core (`v2026-11-25`)**: `12,320,892 B` · SHA-256 `d7b639ac111843afc5d6ed1e3cbf169c58f28740751909e4a6540aa4d9bdcda4`
+            - **Core (`v2026-11-28`)**: `12,386,428 B` · SHA-256 `2a6c5aa8f7c9f90d4870abf3e5fffc07afd5871fa0d1b31cc0a7351754693488`
             - **Manager (`v2.24.30+200`)**: `8,873,778 B` · SHA-256 `63994361c46e857c4321fca3cb002529debedbb37c60f084cb16ad9654b07663`
 
-            #### 本次维护版更新（真机全 8 项诊断全绿通过）
-            1. **阻断看门狗与操作锁的子进程 FD 继承 (`fd 7/8/9`)**：在 [service.sh](module/service.sh)、[iptables.sh](module/scripts/iptables.sh) 与 [switch_mode.sh](module/scripts/switch_mode.sh) 的 `safe_sleep()`、回退 `sleep 1` 及持锁期外部命令统一显式关闭 `7>&- 8>&- 9>&-`，消除 `sleep 60` 等子进程意外继承 `agh_watchdog.flock` / `agh_op.flock` 的隐患。
-            2. **重构 `--diag-flock` `FD_LEAK_CHECK` 与放行 `mksh` 高位暂存 FD**：
-               - 弃用进程名白名单，通过临时软链接实测 `-lname` 能力并显式优先采用 `/system/bin/find` / `/system/bin/toybox find`（主动避开不支持 `-lname` 的 BusyBox `find`），仅对命中的 PID 查询 `exe`/`cmdline`；极少数不支持 `-lname` 的 ROM 自动降级为单次 `ls -ln ... | awk` 兜底，绝不静默漏检；
-               - 对确认身份的合法看门狗主进程（`role=watchdog` + `wd_pid_match=yes`）仅持有单个 `fd=8` 或 `mksh` 临时暂存高位描述符（`fd >= 10`）时准确放行判定 `WATCHDOG_LOCK_OK`，多 FD 或非看门狗进程一律严格报 `FD_LEAK_DETECTED`。
-            3. **三脚本 `--diag-flock` 锁自检去重**：主脚本完成 3 步并发锁实测后向 `switch_mode.sh` / `iptables.sh` 透传已验证工具信息，工具路径与参数一致时免重复等待直接复用 `PASS`（不一致时补跑完整 3 步实测）。
-            4. **Manager `04_lock_diagnostics.txt` 提速 (`Manager v2.24.30`)**：将逐个 FD `readlink` 重构为单次 `ls -ln /proc/$p/fd | grep -E 'agh_|flock'`，真机导出 8 项全部返回 `ok`（`partial_success: false`）。
+            #### 本次更新亮点
+            1. **彻底修复 ARMv8.0 老芯片设备 Core `SIGILL`（退出码 `132`）崩溃**：Core 构建默认档位由 `GOARM64=v8.2` 调整为 `GOARM64=v8.0`（Go runtime 根据 CPU `hwcap` 在支持 LSE 的新设备自动启用 LSE 原子指令，在 ARMv8.0 设备自动回退 LL/SC，全系 64 位 Android 设备通用）。
+            2. **补齐升级备份与安装期核心可执行冒烟校验（[customize.sh](module/customize.sh)）**：
+               - 升级专属备份新增保存旧版 `bin/AdGuardHome`；
+               - 解压暂存核心后立即 `chmod 0755` 并强制执行 `--version` / `--check-config` 校验（修复此前 `--version` 失败反而跳过校验直接覆盖的盲区），若新版在当前 CPU 无法运行且存在可用备份则自动回滚至旧版核心，全新安装失败则明确中止。
+            3. **精简 `nsenter` 冗余探测与加固启动期错误可观测性（[service.sh](module/service.sh)、[switch_mode.sh](module/scripts/switch_mode.sh)）**：
+               - 移除 `spawn_agh_in_root_ns` 与 `start_singleton_watchdog` 中多余的 `-u -i` 命名空间参数，优先使用 `-t 1 -m -n`，消除缺失 `/proc/1/ns/ipc` 内核上的无效探针与冗余 `fork`；
+               - `ensure_agh_started` 启动前新增快速 `--version` 预检并记录 `rc` 与错误摘要至 `agh.log`（同时完整保留运行期 `--logfile discard` 零闪存写盘设计）。
           files: |
             releases/AdGuard_Home_gogogo_${{ env.VERSION_DATE }}.zip
             releases/AdGuardHomeManager.apk

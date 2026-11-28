@@ -2,7 +2,7 @@
 
 > **AdGuard-Home-GoGoGo - 面向 Android 的轻量级 AdGuard Home 模块，支持海外/国内双模一键切换与精准去广告**
 
-基于 Magisk / KernelSU / APatch 的 **AdGuard-Home-GoGoGo**（模块显示名称：`AdGuard Home GoGoGo`）全设备级满血 DNS + SNI 双引擎去广告防火墙模块。内置专属深度瘦身核心 **[AdGuard-Home-GoGoGo-Core](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core)**（`11.75 MiB` 纯静态 `ARMv8.2` LSE 加速、完整内置 NFQUEUE SNI 过滤、100% 零后台磁盘写 I/O），专为追求**极致省电、零断流、局域网免检直通、临时 Root 软重启 30 秒自愈、以及 VPN / 代理无缝协同**打造。
+基于 Magisk / KernelSU / APatch 的 **AdGuard-Home-GoGoGo**（模块显示名称：`AdGuard Home GoGoGo`）全设备级满血 DNS + SNI 双引擎去广告防火墙模块。内置专属深度瘦身核心 **[AdGuard-Home-GoGoGo-Core](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Core)**（`11.81 MiB` 纯静态 `ARMv8.0` 全芯片兼容、内置运行时 LSE 动态加速、完整内置 NFQUEUE SNI 过滤、100% 零后台磁盘写 I/O），专为追求**极致省电、零断流、局域网免检直通、临时 Root 软重启 30 秒自愈、以及 VPN / 代理无缝协同**打造。
 
 配套管理器开源仓库：[AdGuard-Home-GoGoGo Manager](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager)（桌面名称：`AdGuard Home GoGoGo`，快捷磁贴：`AGH GoGoGo`，包名：`com.wu.adgogogo`，已内置于模块刷机包中，刷入时自动安装）
 
@@ -30,7 +30,7 @@
 ## ✨ 核心架构与优化亮点
 
 1. **`nsenter -G 23333` 专属进程组隔离 + 零自吞噬防回环**：
-   - 统一采用 `nsenter -G 23333 -t 1` 启动 `AdGuardHome` 核心（`v2026-11-25`），将核心流量（`uid=0, gid=23333`）与安卓系统 `netd`（`uid=0, gid=0`）在内核层彻底物理隔离；
+   - 统一采用 `nsenter -G 23333 -t 1` 启动 `AdGuardHome` 核心（`v2026-11-28`），将核心流量（`uid=0, gid=23333`）与安卓系统 `netd`（`uid=0, gid=0`）在内核层彻底物理隔离；
    - 无论当前 Wi-Fi 或 VPN 的系统 DNS 是否与上游 IP（如 `1.1.1.1` / `8.8.8.8` / `223.5.5.5`）重合，均能 100% 拦截系统 DNS 请求且绝不发生核心自吞噬回环。
 2. **首包级低功耗 `mangle` 表 SNI 嗅探 (`AGH_SNI`) + 局域网免检直通 + 零 `sysctl` 侵入**：
    - 在 `iptables -t mangle` / `ip6tables -t mangle` 挂载 `AGH_SNI` 链，优先探测内核 `connbytes` 支持（`--connbytes 1:8 --connbytes-dir original --connbytes-mode packets -j NFQUEUE --queue-num 0 --queue-bypass`，不支持时自动回退标准 `443/8443` `NFQUEUE`），仅检查 TLS 握手前 8 个数据包且强制 `--queue-bypass` 零断流，**全程严禁修改任何 `sysctl` 内核参数**；
@@ -61,7 +61,7 @@
 
 ```bash
 chmod +x build.sh
-./build.sh 20261125.2
+./build.sh 20261128.1
 ```
 
 ## 维护与开源
